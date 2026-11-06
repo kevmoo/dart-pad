@@ -14,6 +14,7 @@ import '../preview/models/run_mode.dart';
 import '../shared/events/log_event.dart';
 import '../shared/supported_file_types.dart';
 import '../shared/task_status.dart';
+import '../shared/unthrottled_timer.dart';
 import '../startup/project_loader.dart';
 import '../startup/query_parameters.dart';
 import '../workspace/workspace_session.dart';
@@ -674,7 +675,7 @@ final class DartPadMcpController {
       requestedEntrypoint: requestedEntrypoint,
     );
     if (postRunFrameDelay > Duration.zero) {
-      await Future<void>.delayed(postRunFrameDelay);
+      await unthrottledDelay(postRunFrameDelay);
     }
 
     final preview = session.preview;
@@ -820,7 +821,7 @@ final class DartPadMcpController {
           extensions.contains('ext.flutter.inspector.getRootWidgetSummaryTree')) {
         break;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 100));
+      await unthrottledDelay(const Duration(milliseconds: 100));
     }
 
     final extensionMethod = extensions.contains('ext.flutter.inspector.getRootWidgetSummaryTreeWithPreviews')
@@ -877,7 +878,7 @@ final class DartPadMcpController {
       if (session != null && !session.isDisposed && !host.isInitializingWorkspace) {
         return session;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+      await unthrottledDelay(const Duration(milliseconds: 50));
     }
     if (host.activeSession case final session? when !session.isDisposed) {
       return session;
@@ -899,13 +900,34 @@ final class DartPadMcpController {
   }
 
   Future<void> _waitForPreviewIdle(WorkspaceSession session) async {
-    final deadline = DateTime.now().add(const Duration(seconds: 30));
-    while (!_disposed && !session.isDisposed && DateTime.now().isBefore(deadline)) {
-      final busy = session.taskStatus.hasBlockingPreviewTask || session.preview.state.isTransitioning;
-      if (!busy) {
-        return;
+    bool isIdle() =>
+        _disposed ||
+        session.isDisposed ||
+        (!session.taskStatus.hasBlockingPreviewTask && !session.preview.state.isTransitioning);
+    if (isIdle()) {
+      return;
+    }
+    final completer = Completer<void>();
+    void check() {
+      if (!completer.isCompleted && isIdle()) {
+        completer.complete();
       }
-      await Future<void>.delayed(const Duration(milliseconds: 50));
+    }
+
+    final timeoutTimer = createUnthrottledTimer(const Duration(seconds: 30), () {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    });
+    session.taskStatus.addListener(check);
+    session.preview.addListener(check);
+    try {
+      check();
+      await completer.future;
+    } finally {
+      timeoutTimer.cancel();
+      session.taskStatus.removeListener(check);
+      session.preview.removeListener(check);
     }
   }
 
@@ -921,20 +943,68 @@ final class DartPadMcpController {
     if (expectNewActivity != null) {
       await _waitForInitialActivitySignal(session, expectNewActivity, deadline);
     }
-    var idleSince = _isSessionAnalyzing(session) ? null : DateTime.now();
-    while (!_disposed && !session.isDisposed && DateTime.now().isBefore(deadline)) {
-      if (session.analyzerStatus.isUnavailable) {
+    if (_disposed || session.isDisposed || session.analyzerStatus.isUnavailable) {
+      return;
+    }
+    final remaining = deadline.difference(DateTime.now());
+    if (remaining <= Duration.zero) {
+      return;
+    }
+    if (analyzerIdleWindow <= Duration.zero && !_isSessionAnalyzing(session) && session.analyzerStatus.isInitialized) {
+      return;
+    }
+
+    final completer = Completer<void>();
+    Timer? idleTimer;
+
+    void finish() {
+      idleTimer?.cancel();
+      idleTimer = null;
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    }
+
+    void evaluate([Object? _]) {
+      if (completer.isCompleted) {
+        return;
+      }
+      if (_disposed || session.isDisposed || session.analyzerStatus.isUnavailable) {
+        finish();
         return;
       }
       if (_isSessionAnalyzing(session) || !session.analyzerStatus.isInitialized) {
-        idleSince = null;
-      } else {
-        idleSince ??= DateTime.now();
-        if (DateTime.now().difference(idleSince) >= analyzerIdleWindow) {
-          return;
-        }
+        idleTimer?.cancel();
+        idleTimer = null;
+        return;
       }
-      await Future<void>.delayed(const Duration(milliseconds: 30));
+      if (analyzerIdleWindow <= Duration.zero) {
+        finish();
+        return;
+      }
+      idleTimer ??= createUnthrottledTimer(analyzerIdleWindow, () {
+        idleTimer = null;
+        if (!_isSessionAnalyzing(session) && session.analyzerStatus.isInitialized) {
+          finish();
+        } else {
+          evaluate();
+        }
+      });
+    }
+
+    final deadlineTimer = createUnthrottledTimer(remaining, finish);
+    final activitySub = lsc.analyzerActivityStream.listen(evaluate, onError: evaluate);
+    session.taskStatus.addListener(evaluate);
+    session.diagnostics.addListener(evaluate);
+    try {
+      evaluate();
+      await completer.future;
+    } finally {
+      deadlineTimer.cancel();
+      idleTimer?.cancel();
+      await activitySub.cancel();
+      session.taskStatus.removeListener(evaluate);
+      session.diagnostics.removeListener(evaluate);
     }
   }
 
@@ -943,12 +1013,48 @@ final class DartPadMcpController {
     bool Function() activitySeen,
     DateTime outerDeadline,
   ) async {
-    final signalWindowEnd = DateTime.now().add(const Duration(milliseconds: 600));
-    while (!_disposed && DateTime.now().isBefore(signalWindowEnd) && DateTime.now().isBefore(outerDeadline)) {
-      if (activitySeen() || _isSessionAnalyzing(session)) {
-        return;
+    bool isReady() =>
+        _disposed ||
+        session.isDisposed ||
+        session.analyzerStatus.isUnavailable ||
+        activitySeen() ||
+        _isSessionAnalyzing(session);
+    if (isReady()) {
+      return;
+    }
+    final remainingOuter = outerDeadline.difference(DateTime.now());
+    if (remainingOuter <= Duration.zero) {
+      return;
+    }
+    const maxSignalWindow = Duration(milliseconds: 600);
+    final windowDuration = remainingOuter < maxSignalWindow ? remainingOuter : maxSignalWindow;
+
+    final completer = Completer<void>();
+    void check([Object? _]) {
+      if (!completer.isCompleted && isReady()) {
+        completer.complete();
       }
-      await Future<void>.delayed(const Duration(milliseconds: 25));
+    }
+
+    final windowTimer = createUnthrottledTimer(windowDuration, () {
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
+    });
+    final activitySub = session.languageServerClient?.analyzerActivityStream.listen(
+      check,
+      onError: check,
+    );
+    session.taskStatus.addListener(check);
+    session.diagnostics.addListener(check);
+    try {
+      check();
+      await completer.future;
+    } finally {
+      windowTimer.cancel();
+      await activitySub?.cancel();
+      session.taskStatus.removeListener(check);
+      session.diagnostics.removeListener(check);
     }
   }
 

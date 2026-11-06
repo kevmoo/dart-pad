@@ -7,6 +7,7 @@ import 'dart:async';
 import 'package:clock/clock.dart';
 
 import 'task_status.dart';
+import 'unthrottled_timer.dart';
 
 /// Tracks analyzer readiness and translates LSP analysis activity into
 /// application tasks.
@@ -36,12 +37,14 @@ final class AnalyzerStatusController {
   TaskStatusHandle? _initializationTask;
   TaskStatusHandle? _currentTask;
   Timer? _idleTimer;
+  bool _startingTask = false;
   bool _initializationFinished = false;
   bool _unavailable = false;
   bool _disposed = false;
 
   /// Whether the analyzer is currently initializing or analyzing files.
-  bool get isAnalyzing => !_disposed && (_initializationTask != null || _currentTask != null || _idleTimer != null);
+  bool get isAnalyzing =>
+      !_disposed && (_startingTask || _initializationTask != null || _currentTask != null || _idleTimer != null);
 
   /// Whether initial analyzer startup has finished (either ready or unavailable).
   bool get isInitialized => _initializationFinished;
@@ -49,13 +52,22 @@ final class AnalyzerStatusController {
   /// Whether the analyzer failed to start or disconnected.
   bool get isUnavailable => _unavailable;
 
+  TaskStatusHandle _startTask(TaskKind kind) {
+    _startingTask = true;
+    try {
+      return _taskStatus.startTask(kind);
+    } finally {
+      _startingTask = false;
+    }
+  }
+
   /// Starts the task spanning analyzer startup and initial analysis.
   void beginInitialization() {
     if (_disposed || _initializationTask != null || _initializationFinished) {
       return;
     }
     _cancelIdleTimer();
-    _initializationTask = _taskStatus.startTask(TaskKind.startingAnalyzer);
+    _initializationTask = _startTask(TaskKind.startingAnalyzer);
   }
 
   /// Applies an analyzer busy/idle notification.
@@ -70,10 +82,10 @@ final class AnalyzerStatusController {
         return;
       }
       if (!_initializationFinished) {
-        _initializationTask = _taskStatus.startTask(TaskKind.startingAnalyzer);
+        _initializationTask = _startTask(TaskKind.startingAnalyzer);
         return;
       }
-      _currentTask ??= _taskStatus.startTask(TaskKind.analyzing);
+      _currentTask ??= _startTask(TaskKind.analyzing);
       return;
     }
 
@@ -82,9 +94,9 @@ final class AnalyzerStatusController {
     }
 
     if (_initializationTask case final task?) {
-      task.succeed();
       _initializationTask = null;
       _initializationFinished = true;
+      task.succeed();
     }
 
     if (_currentTask == null) {
@@ -92,16 +104,18 @@ final class AnalyzerStatusController {
     }
 
     if (idleDebounce == Duration.zero) {
-      _currentTask?.succeed();
+      final task = _currentTask;
       _currentTask = null;
+      task?.succeed();
     } else {
       final finished = clock.now();
       _idleTimer?.cancel();
-      _idleTimer = Timer(idleDebounce, () {
+      _idleTimer = createUnthrottledTimer(idleDebounce, () {
         _idleTimer = null;
         if (!_disposed) {
-          _currentTask?.succeed(finishedAt: finished);
+          final task = _currentTask;
           _currentTask = null;
+          task?.succeed(finishedAt: finished);
         }
       });
     }
@@ -118,21 +132,20 @@ final class AnalyzerStatusController {
       return;
     }
     _cancelIdleTimer();
-    final hadActiveTask = _initializationTask != null || _currentTask != null;
-    if (_initializationTask case final task?) {
-      task.fail();
-      _initializationTask = null;
-    }
-    if (_currentTask case final task?) {
-      task.fail();
-      _currentTask = null;
-    }
-    if (!hadActiveTask) {
-      final kind = _initializationFinished ? TaskKind.analyzing : TaskKind.startingAnalyzer;
-      _taskStatus.startTask(kind).fail();
-    }
+    final initTask = _initializationTask;
+    final currentTask = _currentTask;
+    final hadActiveTask = initTask != null || currentTask != null;
+    final wasInitialized = _initializationFinished;
+    _initializationTask = null;
+    _currentTask = null;
     _initializationFinished = true;
     _unavailable = true;
+    initTask?.fail();
+    currentTask?.fail();
+    if (!hadActiveTask) {
+      final kind = wasInitialized ? TaskKind.analyzing : TaskKind.startingAnalyzer;
+      _taskStatus.startTask(kind).fail();
+    }
   }
 
   /// Resets the controller state and cancels any pending analysis tasks.
@@ -141,12 +154,14 @@ final class AnalyzerStatusController {
       return;
     }
     _cancelIdleTimer();
-    _initializationTask?.cancel();
+    final initTask = _initializationTask;
+    final currentTask = _currentTask;
     _initializationTask = null;
-    _currentTask?.cancel();
     _currentTask = null;
     _initializationFinished = false;
     _unavailable = false;
+    initTask?.cancel();
+    currentTask?.cancel();
   }
 
   /// Cancels any active tasks and disposes the controller.
@@ -156,13 +171,11 @@ final class AnalyzerStatusController {
     }
     _disposed = true;
     _cancelIdleTimer();
-    if (_initializationTask case final task?) {
-      task.cancel();
-      _initializationTask = null;
-    }
-    if (_currentTask case final task?) {
-      task.cancel();
-      _currentTask = null;
-    }
+    final initTask = _initializationTask;
+    final currentTask = _currentTask;
+    _initializationTask = null;
+    _currentTask = null;
+    initTask?.cancel();
+    currentTask?.cancel();
   }
 }

@@ -319,6 +319,11 @@ async def run_tests() -> None:
 
             fqdn = socket.getfqdn()
             if fqdn:
+                try:
+                    socket.getaddrinfo(fqdn, port, 0, socket.SOCK_STREAM)
+                except OSError:
+                    fqdn = ""
+            if fqdn:
                 st_host, _, _ = await asyncio.to_thread(
                     http_get, f"http://{fqdn}:{port}/healthz"
                 )

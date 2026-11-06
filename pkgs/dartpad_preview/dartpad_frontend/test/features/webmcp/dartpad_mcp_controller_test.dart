@@ -16,6 +16,7 @@ import 'package:dartpad_frontend/features/editor/codemirror/code_mirror_tab.dart
 import 'package:dartpad_frontend/features/preview/models/run_mode.dart';
 import 'package:dartpad_frontend/features/shared/app_event_bus.dart';
 import 'package:dartpad_frontend/features/shared/task_status.dart';
+import 'package:dartpad_frontend/features/shared/unthrottled_timer.dart';
 import 'package:dartpad_frontend/features/startup/project_loader.dart';
 import 'package:dartpad_frontend/features/webmcp/dartpad_mcp_controller.dart';
 import 'package:dartpad_frontend/features/workspace/data/workspace_repository.dart';
@@ -209,5 +210,26 @@ void main() {
     expect(pubCalls.single.args, <String>['collection']);
     expect(pubspecTab.content, contains('collection: ^1.19.0'));
     expect(pubspecTab.hasUnsavedChanges, isFalse);
+  });
+
+  test('createUnthrottledTimer fires and supports cancellation', () async {
+    var cancelledFired = false;
+    final cancelled = createUnthrottledTimer(const Duration(milliseconds: 25), () {
+      cancelledFired = true;
+    });
+    expect(cancelled.isActive, isTrue);
+    expect(cancelled.tick, 0);
+    cancelled.cancel();
+    expect(cancelled.isActive, isFalse);
+
+    var activeFired = false;
+    final active = createUnthrottledTimer(const Duration(milliseconds: 15), () {
+      activeFired = true;
+    });
+    await unthrottledDelay(const Duration(milliseconds: 40));
+    expect(activeFired, isTrue);
+    expect(active.isActive, isFalse);
+    expect(active.tick, 1);
+    expect(cancelledFired, isFalse);
   });
 }

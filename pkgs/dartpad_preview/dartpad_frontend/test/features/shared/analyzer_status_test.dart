@@ -392,5 +392,36 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 60));
       taskStatus.dispose();
     });
+
+    test('notifies taskStatus listeners after clearing isAnalyzing state', () async {
+      final taskStatus = TaskStatusController();
+      final controller = AnalyzerStatusController(
+        taskStatus,
+        idleDebounce: const Duration(milliseconds: 20),
+      );
+      final observedStates = <({bool isAnalyzing, bool isInitialized})>[];
+      taskStatus.addListener(() {
+        observedStates.add((
+          isAnalyzing: controller.isAnalyzing,
+          isInitialized: controller.isInitialized,
+        ));
+      });
+
+      controller.beginInitialization();
+      expect(observedStates.last, (isAnalyzing: true, isInitialized: false));
+
+      controller.update(isAnalyzing: false);
+      expect(observedStates.last, (isAnalyzing: false, isInitialized: true));
+
+      controller.update(isAnalyzing: true);
+      expect(observedStates.last, (isAnalyzing: true, isInitialized: true));
+
+      controller.update(isAnalyzing: false);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+      expect(observedStates.last, (isAnalyzing: false, isInitialized: true));
+
+      controller.dispose();
+      taskStatus.dispose();
+    });
   });
 }
