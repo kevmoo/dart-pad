@@ -40,6 +40,15 @@ final class AnalyzerStatusController {
   bool _unavailable = false;
   bool _disposed = false;
 
+  /// Whether the analyzer is currently initializing or analyzing files.
+  bool get isAnalyzing => !_disposed && (_initializationTask != null || _currentTask != null || _idleTimer != null);
+
+  /// Whether initial analyzer startup has finished (either ready or unavailable).
+  bool get isInitialized => _initializationFinished;
+
+  /// Whether the analyzer failed to start or disconnected.
+  bool get isUnavailable => _unavailable;
+
   /// Starts the task spanning analyzer startup and initial analysis.
   void beginInitialization() {
     if (_disposed || _initializationTask != null || _initializationFinished) {

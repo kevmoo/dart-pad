@@ -276,6 +276,45 @@ void main() {
     });
   });
 
+  group('QueryParameters WebMCP options', () {
+    test('allows mcp, mcp_port, and mcp_ws without invalidating query parsing', () {
+      final parsed = parse('?sample=counter&s=3&mcp=1&mcp_port=8787&mcp_ws=ws://127.0.0.1:9000/mcp-ws');
+      expect(parsed.session?.value, 3);
+      expect(
+        parsed.source,
+        isA<SampleSourceSelection>().having((source) => source.sampleId, 'sampleId', 'counter'),
+      );
+      expect(parsed.raw[QueryParameters.mcp], ['1']);
+      expect(parsed.raw[QueryParameters.mcpPort], ['8787']);
+      expect(parsed.raw[QueryParameters.mcpWs], ['ws://127.0.0.1:9000/mcp-ws']);
+    });
+
+    test('resolves outbound WebMCP WebSocket endpoint precedence', () {
+      expect(
+        QueryParameters.resolveMcpWebSocketUri(Uri.parse('http://127.0.0.1:8080/?s=3')),
+        isNull,
+      );
+      expect(
+        QueryParameters.resolveMcpWebSocketUri(Uri.parse('http://127.0.0.1:8080/?s=3&mcp=1')),
+        Uri.parse('ws://127.0.0.1:8080/mcp-ws'),
+      );
+      expect(
+        QueryParameters.resolveMcpWebSocketUri(Uri.parse('https://dartpad.dev/?mcp=true')),
+        Uri.parse('wss://dartpad.dev/mcp-ws'),
+      );
+      expect(
+        QueryParameters.resolveMcpWebSocketUri(Uri.parse('http://localhost:8080/?mcp=1&mcp_port=8787')),
+        Uri.parse('ws://127.0.0.1:8787/mcp-ws'),
+      );
+      expect(
+        QueryParameters.resolveMcpWebSocketUri(
+          Uri.parse('http://localhost:8080/?mcp=1&mcp_port=8787&mcp_ws=ws://127.0.0.1:9123/custom-ws'),
+        ),
+        Uri.parse('ws://127.0.0.1:9123/custom-ws'),
+      );
+    });
+  });
+
   test('uses defaults for an empty query', () {
     final parameters = parse('');
 

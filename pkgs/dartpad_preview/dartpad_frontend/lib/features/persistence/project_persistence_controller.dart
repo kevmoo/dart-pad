@@ -54,6 +54,7 @@ final class ProjectPersistenceController extends ChangeNotifier {
 
   /// Session id of the tab's current project, set by [prepareLoad].
   int? _sessionId;
+  int? get sessionId => _sessionId;
 
   PersistenceNotice? _notice;
   PersistenceNotice? get notice => _notice;

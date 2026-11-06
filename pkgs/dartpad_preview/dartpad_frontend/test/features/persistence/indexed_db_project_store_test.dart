@@ -217,6 +217,14 @@ void main() {
       ).matchesQuery(Uri.parse('?theme=dark&sample=counter').queryParametersAll),
       isTrue,
     );
+    expect(
+      savedProject(
+        query: '?sample=counter',
+      ).matchesQuery(
+        Uri.parse('?sample=counter&s=3&mcp=1&mcp_port=8787&mcp_ws=ws://127.0.0.1:8787/mcp-ws').queryParametersAll,
+      ),
+      isTrue,
+    );
   });
 
   test('restored tabs append requested file params the snapshot did not open', () {

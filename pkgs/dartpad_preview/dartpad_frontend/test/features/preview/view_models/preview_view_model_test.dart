@@ -80,11 +80,31 @@ final class _CancelFailingSubscription implements StreamSubscription<String> {
   Future<E> asFuture<E>([E? futureValue]) => _delegate.asFuture(futureValue);
 }
 
+final class _FakeVmService implements VmService {
+  int disposeCalls = 0;
+  final Completer<void> _done = Completer<void>();
+
+  @override
+  Future<void> get onDone => _done.future;
+
+  @override
+  Future<void> dispose() async {
+    disposeCalls++;
+    if (!_done.isCompleted) {
+      _done.complete();
+    }
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 final class FakePreviewSandbox implements PreviewSandbox {
   int disposeCount = 0;
   int runCount = 0;
   int hotRestartCount = 0;
   int hotReloadCount = 0;
+  int startServiceProtocolCount = 0;
   String? path;
   String? mode;
   final consoleController = StreamController<String>.broadcast(sync: true);
@@ -93,6 +113,7 @@ final class FakePreviewSandbox implements PreviewSandbox {
   Future<void> Function()? onRestart;
   Future<void> Function()? onReload;
   Future<void> Function()? onClose;
+  Future<VmService> Function()? onStartServiceProtocol;
   Exception? closeError;
   Stream<String>? consoleStream;
   @override
@@ -124,6 +145,15 @@ final class FakePreviewSandbox implements PreviewSandbox {
   Stream<String> get console => consoleStream ?? consoleController.stream;
   @override
   Stream<String> get errors => errorController.stream;
+  @override
+  Future<VmService> startServiceProtocol() async {
+    startServiceProtocolCount++;
+    if (onStartServiceProtocol case final callback?) {
+      return callback();
+    }
+    return _FakeVmService();
+  }
+
   @override
   Future<void> close() async {
     disposeCount++;
@@ -622,5 +652,58 @@ void main() {
     await reload;
     expect(preview.state, isA<PreviewInitial>());
     expect(sandbox.disposeCount, 1);
+  });
+
+  test('buffers Flutter and console sandbox logs up to maxSandboxLogs and preserves across hot reload', () async {
+    await preview.runCode('lib/main.dart');
+    for (var i = 0; i < PreviewViewModel.maxSandboxLogs + 5; i++) {
+      sandbox.consoleController.add('line-$i');
+    }
+    sandbox.errorController.add('boom');
+
+    final allEntries = preview.readSandboxLogs();
+    expect(allEntries, hasLength(PreviewViewModel.maxSandboxLogs));
+    expect(allEntries.first.message, 'line-6');
+    expect(allEntries.last.message, 'boom');
+    expect(allEntries.last.isError, isTrue);
+
+    expect(preview.readSandboxLogs(errorsOnly: true).map((entry) => entry.message), ['boom']);
+    expect(preview.readSandboxLogs(limit: 2).map((entry) => entry.message), [
+      'line-${PreviewViewModel.maxSandboxLogs + 4}',
+      'boom',
+    ]);
+
+    await preview.hotReloadCode();
+    sandbox.consoleController.add('[WebMCP] Hot reload verified!');
+    expect(preview.readSandboxLogs(limit: 1).single.message, '[WebMCP] Hot reload verified!');
+
+    final cleared = preview.readSandboxLogs(clear: true);
+    expect(cleared, isNotEmpty);
+    expect(preview.readSandboxLogs(), isEmpty);
+  });
+
+  test('caches VmService for active sandbox and disposes on hot restart and stop', () async {
+    final createdServices = <_FakeVmService>[];
+    sandbox.onStartServiceProtocol = () async {
+      final service = _FakeVmService();
+      createdServices.add(service);
+      return service;
+    };
+
+    await preview.runCode('lib/main.dart');
+    final first = await preview.connectVmService();
+    final cached = await preview.connectVmService();
+    expect(identical(first, cached), isTrue);
+    expect(sandbox.startServiceProtocolCount, 1);
+
+    await preview.restartCode();
+    expect(createdServices.first.disposeCalls, 1);
+
+    final afterRestart = await preview.connectVmService();
+    expect(identical(first, afterRestart), isFalse);
+    expect(sandbox.startServiceProtocolCount, 2);
+
+    await preview.stopCode();
+    expect(createdServices.last.disposeCalls, 1);
   });
 }

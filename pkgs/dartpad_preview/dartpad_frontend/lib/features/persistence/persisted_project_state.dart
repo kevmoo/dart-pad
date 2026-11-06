@@ -51,15 +51,22 @@ final class PersistedProjectState {
 
   /// Compare decoded options; parameter order is irrelevant, value order is not.
   bool matchesQuery(Map<String, List<String>> other) {
-    // Theme is presentation, `s` identifies the session, and `file` only adds tabs on restore.
+    // Theme and MCP transport flags are presentation-only, `s` identifies the
+    // session, and `file` only adds tabs on restore.
     final projectQuery = Map<String, List<String>>.of(query)
       ..remove(QueryParameters.theme)
       ..remove(QueryParameters.file)
-      ..remove(QueryParameters.sessionId);
+      ..remove(QueryParameters.sessionId)
+      ..remove(QueryParameters.mcp)
+      ..remove(QueryParameters.mcpWs)
+      ..remove(QueryParameters.mcpPort);
     final otherProjectQuery = Map<String, List<String>>.of(other)
       ..remove(QueryParameters.theme)
       ..remove(QueryParameters.file)
-      ..remove(QueryParameters.sessionId);
+      ..remove(QueryParameters.sessionId)
+      ..remove(QueryParameters.mcp)
+      ..remove(QueryParameters.mcpWs)
+      ..remove(QueryParameters.mcpPort);
     if (projectQuery.length != otherProjectQuery.length) {
       return false;
     }

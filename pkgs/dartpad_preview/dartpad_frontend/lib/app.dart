@@ -53,6 +53,7 @@ import 'features/startup/project_loader.dart';
 import 'features/startup/project_request.dart';
 import 'features/startup/project_source.dart';
 import 'features/startup/query_parameters.dart';
+import 'features/webmcp/dartpad_mcp_controller.dart';
 import 'features/workspace/data/workspace_repository.dart';
 import 'features/workspace/embed_message_controller.dart';
 import 'features/workspace/embed_runtime_controller.dart';
@@ -95,11 +96,13 @@ final class App extends StatefulComponent {
 }
 
 /// Composition root – wires all services and drives the startup lifecycle.
-final class _AppState extends State<App> {
+final class _AppState extends State<App> implements DartPadMcpHost {
   late final bool _isEmbedMode;
   late final PanelLayoutController _panels;
   EmbedRuntimeController? _embedRuntime;
   late final EmbedMessageController _embedMessages;
+  DartPadMcpController? _mcpController;
+  Future<void>? _workspaceToolsFuture;
 
   late final ProjectPersistenceController _persistence;
 
@@ -145,6 +148,30 @@ final class _AppState extends State<App> {
   SdkInfo get _currentSdk => _activeSession?.repository.sdk ?? defaultSdk;
 
   @override
+  WorkspaceSession? get activeSession => _activeSession;
+
+  @override
+  bool get isInitializingWorkspace => _isInitializingWorkspace;
+
+  @override
+  String? get workspacePreparationFailure => _workspacePreparationFailure;
+
+  @override
+  Future<void>? get workspaceToolsReady => _workspaceToolsFuture;
+
+  @override
+  Uri get currentUri => component.initialUri ?? Uri.tryParse(web.window.location.href) ?? Uri.base;
+
+  @override
+  String? get sessionId {
+    if (_persistence.sessionId case final id?) {
+      return '$id';
+    }
+    final parsed = SessionId.parse(currentUri.queryParameters[QueryParameters.sessionId]);
+    return parsed == null ? null : '${parsed.value}';
+  }
+
+  @override
   void initState() {
     super.initState();
     _isEmbedMode = QueryParameters.isEmbeddedUri(component.initialUri ?? Uri.base);
@@ -170,6 +197,7 @@ final class _AppState extends State<App> {
       _updateScreenSize();
     });
     _keySubscription = web.EventStreamProviders.keyDownEvent.forTarget(web.document).listen(_handleGlobalKeyDown);
+    _mcpController = DartPadMcpController(host: this);
 
     unawaited(_loadProject(component.initialUri ?? Uri.base));
   }
@@ -178,6 +206,7 @@ final class _AppState extends State<App> {
   /// project switches. Only the latest load may replace the visible session.
   Future<void> _loadProject(Uri uri, {bool startFresh = false}) async {
     final generation = ++_loadGeneration;
+    _workspaceToolsFuture = null;
     setState(() {
       _isInitializingWorkspace = true;
       _workspacePreparationFailure = null;
@@ -442,13 +471,15 @@ final class _AppState extends State<App> {
       if (!_isCurrentRuntime(session, generation)) {
         return;
       }
-      final ready = await _initializeWorkspaceTools(
+      final toolsFuture = _initializeWorkspaceTools(
         session,
         workspace,
         session.initialProject,
         autoRun: false,
         runtimeGeneration: generation,
       );
+      _workspaceToolsFuture = toolsFuture;
+      final ready = await toolsFuture;
       if (!ready && _isCurrentRuntime(session, generation)) {
         throw StateError('Could not prepare the example. Try Run again.');
       }
@@ -494,7 +525,10 @@ final class _AppState extends State<App> {
         return;
       }
       setState(() => _isInitializingWorkspace = false);
-      unawaited(_initializeWorkspaceTools(session, workspace, session.initialProject));
+      _mcpController?.notifySessionChanged();
+      final toolsFuture = _initializeWorkspaceTools(session, workspace, session.initialProject);
+      _workspaceToolsFuture = toolsFuture;
+      unawaited(toolsFuture);
     } catch (error, stackTrace) {
       if (!_isCurrent(session)) {
         return;
@@ -650,6 +684,7 @@ final class _AppState extends State<App> {
     final query = {...request.query, QueryParameters.sessionId: '$sessionId'};
     final search = Uri(queryParameters: query).query;
     web.window.history.replaceState(null, '', search.isEmpty ? web.window.location.pathname : '?$search');
+    _mcpController?.notifySessionChanged();
   }
 
   void _resetWorkspace(ProjectRequest request) {
@@ -669,6 +704,7 @@ final class _AppState extends State<App> {
     if (oldSession == null || _isInitializingWorkspace || newSdk == _currentSdk) {
       return;
     }
+    _workspaceToolsFuture = null;
     setState(() => _isInitializingWorkspace = true);
     try {
       await oldSession.tabs.saveAllTabs();
@@ -1047,6 +1083,8 @@ final class _AppState extends State<App> {
 
   @override
   void dispose() {
+    _mcpController?.dispose();
+    _mcpController = null;
     _panels.dispose();
     _embedMessages.dispose();
     _embedRuntime?.dispose();

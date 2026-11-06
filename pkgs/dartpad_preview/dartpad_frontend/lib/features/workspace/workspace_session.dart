@@ -176,6 +176,12 @@ final class WorkspaceSession {
   StreamSubscription<AnalyzerActivity>? _analyzerSubscription;
   bool _disposed = false;
 
+  /// The active language server client, or `null` before startup or when suspended.
+  LanguageServerClient? get languageServerClient => _languageServerClient;
+
+  /// Whether this workspace session has been disposed.
+  bool get isDisposed => _disposed;
+
   /// Invalidates pending Pub/LSP initialization when the runtime is suspended.
   int runtimeGeneration = 0;
 

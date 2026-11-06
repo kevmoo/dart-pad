@@ -25,6 +25,9 @@ abstract interface class PreviewSandbox {
   /// Runtime errors, including unhandled asynchronous errors, emitted by the application.
   Stream<String> get errors;
 
+  /// Connects a Dart VM Service client to the running sandbox isolate.
+  Future<VmService> startServiceProtocol();
+
   /// Closes the sandbox and releases all associated resources.
   Future<void> close();
 }
@@ -72,6 +75,8 @@ final class IframePreviewSandbox implements PreviewSandbox {
   @override
   Stream<String> get errors =>
       _sandbox.console.where((event) => event.level == ConsoleLevel.error).map((event) => event.message);
+  @override
+  Future<VmService> startServiceProtocol() => _sandbox.startServiceProtocol();
 
   @override
   Future<void> close() => _closing ??= _close();

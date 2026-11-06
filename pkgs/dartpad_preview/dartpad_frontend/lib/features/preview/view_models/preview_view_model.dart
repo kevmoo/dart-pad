@@ -3,7 +3,9 @@
 // BSD-style license that can be found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:collection';
 
+import 'package:clock/clock.dart';
 import 'package:dartpad/dartpad.dart';
 import 'package:jaspr/jaspr.dart';
 import 'package:logging/logging.dart';
@@ -19,8 +21,31 @@ import '../models/preview_sandbox.dart';
 import '../models/preview_state.dart';
 import '../models/run_mode.dart';
 
+/// A timestamped console or error entry emitted by the running sandbox.
+final class SandboxLogEntry {
+  const SandboxLogEntry({
+    required this.message,
+    required this.isError,
+    required this.timestamp,
+  });
+
+  final String message;
+  final bool isError;
+  final DateTime timestamp;
+
+  Map<String, Object?> toJson() => {
+    'message': message,
+    'level': isError ? 'error' : 'info',
+    'isError': isError,
+    'timestamp': timestamp.toUtc().toIso8601String(),
+  };
+}
+
 /// Coordinates UI state and synchronization around the SDK-owned compiler/runtime.
 interface class PreviewViewModel extends ChangeNotifier implements RunAvailability {
+  /// Maximum number of sandbox console and error entries retained in memory.
+  static const maxSandboxLogs = 500;
+
   /// Starts with an [initialMode] for the SDK and entrypoint.
   ///
   /// A null [modeOverride] allows inference on subsequent runs; a value keeps
@@ -95,10 +120,19 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
   RunMode get previewMode => _previewMode;
 
   final List<ConsoleEntry> _appLogs = [];
+  final ListQueue<SandboxLogEntry> _sandboxLogs = ListQueue<SandboxLogEntry>();
 
   /// Console entries emitted by the running Dart application.
   List<ConsoleEntry> get appLogs => List.unmodifiable(_appLogs);
+
+  /// The most recent run or hot-reload failure message, or `null` if the last
+  /// preview action succeeded.
+  String? get lastActionError => _lastActionError;
+  String? _lastActionError;
+
   PreviewSandbox? _sandbox;
+  VmService? _vmService;
+  Future<VmService>? _connectingVmService;
   String? _runningPath;
   RunMode? _runningMode;
   final List<StreamSubscription<String>> _subscriptions = [];
@@ -159,6 +193,8 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
         ? PreviewRestarting(entrypoint, autoStart: autoStart)
         : PreviewStarting(entrypoint, autoStart: autoStart);
     _appLogs.clear();
+    _sandboxLogs.clear();
+    _lastActionError = null;
     notifyListeners();
     var failedTask = kind;
     try {
@@ -217,7 +253,7 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
       failedTask = TaskKind.compilingApplication;
       final result = await _workspaceRepository.taskStatus.runTask(
         TaskKind.compilingApplication,
-        () => reuse ? sandbox.hotRestart() : sandbox.run(entrypoint, mode: runMode.mode),
+        () => _executeSandboxLaunch(sandbox, entrypoint, runMode, reuse: reuse),
         blocksPreview: true,
       );
       if (!_current(id)) {
@@ -236,9 +272,11 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
         return;
       }
       _eventBus.dispatch(LogEvent('Run failed', level: Level.SEVERE, error: error, stackTrace: stack));
+      final message = error is DartPadException ? error.message : error.toString();
+      _lastActionError = message;
       _state = PreviewCompileError(
         entrypoint,
-        error is DartPadException ? error.message : error.toString(),
+        message,
         action: action,
         failedTask: failedTask,
       );
@@ -289,6 +327,7 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
     final sandbox = _sandbox!;
     final task = _workspaceRepository.taskStatus.startTask(TaskKind.hotReload, blocksPreview: true);
     _state = PreviewHotReloading(entrypoint);
+    _lastActionError = null;
     notifyListeners();
     try {
       await _saveAndFlush();
@@ -309,6 +348,7 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
       if (!_current(id)) {
         return;
       }
+      _lastActionError = error is DartPadException ? error.message : error.toString();
       _eventBus.dispatch(
         LogEvent(
           'Hot reload failed',
@@ -378,11 +418,111 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
     }
   }
 
+  Future<({String log})> _executeSandboxLaunch(
+    PreviewSandbox sandbox,
+    String entrypoint,
+    RunMode runMode, {
+    required bool reuse,
+  }) async {
+    if (reuse) {
+      await _disposeVmService();
+      return sandbox.hotRestart();
+    }
+    return sandbox.run(entrypoint, mode: runMode.mode);
+  }
+
+  /// Connects or returns the cached [VmService] for the active sandbox.
+  Future<VmService> connectVmService({bool forceReconnect = false}) async {
+    final sandbox = _sandbox;
+    if (_disposed || sandbox == null) {
+      throw StateError('No active preview sandbox is running.');
+    }
+    if (forceReconnect) {
+      await _disposeVmService();
+    }
+    if (_vmService case final existing?) {
+      return existing;
+    }
+    if (_connectingVmService case final pending?) {
+      return pending;
+    }
+    final future = _openVmService(sandbox);
+    _connectingVmService = future;
+    return future;
+  }
+
+  Future<VmService> _openVmService(PreviewSandbox sandbox) async {
+    try {
+      final service = await sandbox.startServiceProtocol();
+      if (_disposed || !identical(_sandbox, sandbox)) {
+        await service.dispose();
+        throw StateError('Preview sandbox changed while connecting VM Service.');
+      }
+      _vmService = service;
+      unawaited(
+        service.onDone.then((_) {
+          if (identical(_vmService, service)) {
+            _vmService = null;
+          }
+        }),
+      );
+      return service;
+    } finally {
+      _connectingVmService = null;
+    }
+  }
+
+  Future<void> _disposeVmService() async {
+    final active = _vmService;
+    _vmService = null;
+    _connectingVmService = null;
+    if (active != null) {
+      try {
+        await active.dispose();
+      } catch (_) {
+        // Ignore errors while closing a retired VM Service connection.
+      }
+    }
+  }
+
+  /// Returns buffered sandbox console and error entries across both Flutter and
+  /// Dart console runs.
+  List<SandboxLogEntry> readSandboxLogs({
+    bool errorsOnly = false,
+    bool clear = false,
+    int? limit,
+  }) {
+    final filtered = errorsOnly
+        ? _sandboxLogs.where((entry) => entry.isError).toList(growable: false)
+        : List<SandboxLogEntry>.unmodifiable(_sandboxLogs);
+    final entries = (limit != null && limit >= 0 && filtered.length > limit)
+        ? filtered.sublist(filtered.length - limit)
+        : filtered;
+    if (clear) {
+      _sandboxLogs.clear();
+    }
+    return entries;
+  }
+
+  void _recordSandboxLog(String message, {required bool isError}) {
+    if (_sandboxLogs.length >= maxSandboxLogs) {
+      _sandboxLogs.removeFirst();
+    }
+    _sandboxLogs.addLast(
+      SandboxLogEntry(
+        message: message,
+        isError: isError,
+        timestamp: clock.now(),
+      ),
+    );
+  }
+
   void _attachOutput(PreviewSandbox sandbox) {
     void output(String message, Level level) {
       if (_disposed || !identical(_sandbox, sandbox)) {
         return;
       }
+      _recordSandboxLog(message, isError: level >= Level.SEVERE);
       if (_previewMode == RunMode.flutter ||
           message.startsWith('Starting application from') ||
           message.startsWith('Hot restarting application from')) {
@@ -437,6 +577,7 @@ interface class PreviewViewModel extends ChangeNotifier implements RunAvailabili
           }
         }
       } finally {
+        await _disposeVmService();
         await sandbox?.close();
       }
     } finally {

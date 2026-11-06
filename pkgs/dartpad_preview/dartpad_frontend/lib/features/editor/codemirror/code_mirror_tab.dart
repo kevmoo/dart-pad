@@ -204,6 +204,27 @@ final class WorkspaceCodeMirrorTab extends CodeMirrorTab {
     await _persistCurrentContent();
   }
 
+  /// Replaces the editor buffer with [content] and persists it immediately.
+  Future<void> writeContentFromMcp(String content) async {
+    editor.text = content;
+    if (_isDirty) {
+      await save();
+    } else {
+      await _persistCurrentContent();
+    }
+  }
+
+  /// Synchronizes the editor buffer with externally updated workspace [content]
+  /// (for example after `pub add` modifies `pubspec.yaml`).
+  void syncSavedContent(String content) {
+    _savedContent = content;
+    if (editor.text != content) {
+      editor.text = content;
+    }
+    _isDirty = false;
+    _notifyUpdate();
+  }
+
   Future<void> _persistCurrentContent() async {
     final content = editor.text;
     await workspaceResourceApi.root.getFile(path).writeContent(content);

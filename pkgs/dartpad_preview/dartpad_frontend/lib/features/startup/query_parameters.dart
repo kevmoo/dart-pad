@@ -36,6 +36,12 @@ final class QueryParameters {
   static const split = 'split';
   static const panels = 'panels';
 
+  // Outbound WebMCP bridge connection options. Presentation/transport only;
+  // PersistedProjectState.matchesQuery ignores them.
+  static const mcp = 'mcp';
+  static const mcpWs = 'mcp_ws';
+  static const mcpPort = 'mcp_port';
+
   /// Keys from retired URLs. Any of them makes the query invalid.
   static const obsolete = ['archive', 'path', 'main'];
 
@@ -51,6 +57,54 @@ final class QueryParameters {
   /// is safe before the full query is validated. Legacy HTML entrypoints redirect
   /// to this query option before the app loads.
   static bool isEmbeddedUri(Uri uri) => uri.queryParametersAll[embed]?.contains('true') == true;
+
+  /// Resolves the outbound WebMCP WebSocket endpoint configured by [uri], or
+  /// returns `null` when no bridge parameter (`mcp_ws`, `mcp_port`, `mcp`) is set.
+  static Uri? resolveMcpWebSocketUri(Uri uri) {
+    final raw = uri.queryParametersAll;
+    if (_resolveExplicitMcpWs(_lenient(raw, mcpWs)) case final explicitUri?) {
+      return explicitUri;
+    }
+    if (_resolvePortMcpWs(_lenient(raw, mcpPort)) case final portUri?) {
+      return portUri;
+    }
+    return _resolveSameOriginMcpWs(uri, _lenient(raw, mcp));
+  }
+
+  static Uri? _resolveExplicitMcpWs(String? value) {
+    if (value == null || value.isEmpty) {
+      return null;
+    }
+    final parsed = Uri.tryParse(value);
+    if (parsed == null || (parsed.scheme != 'ws' && parsed.scheme != 'wss') || parsed.host.isEmpty) {
+      return null;
+    }
+    return parsed;
+  }
+
+  static Uri? _resolvePortMcpWs(String? value) {
+    final port = int.tryParse(value ?? '');
+    if (port == null || port <= 0 || port > 65535) {
+      return null;
+    }
+    return Uri(scheme: 'ws', host: '127.0.0.1', port: port, path: '/mcp-ws');
+  }
+
+  static Uri? _resolveSameOriginMcpWs(Uri pageUri, String? flag) {
+    final normalized = flag?.toLowerCase();
+    if (normalized != '1' && normalized != 'true') {
+      return null;
+    }
+    if (pageUri.host.isEmpty) {
+      return null;
+    }
+    return Uri(
+      scheme: pageUri.scheme == 'https' ? 'wss' : 'ws',
+      host: pageUri.host,
+      port: pageUri.hasPort ? pageUri.port : null,
+      path: '/mcp-ws',
+    );
+  }
 
   /// Parses and validates a dartpad [uri]'s query.
   factory QueryParameters.fromUri(Uri uri) {
