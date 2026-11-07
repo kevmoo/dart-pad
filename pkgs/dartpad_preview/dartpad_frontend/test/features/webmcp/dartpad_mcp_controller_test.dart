@@ -18,7 +18,9 @@ import 'package:dartpad_frontend/features/shared/app_event_bus.dart';
 import 'package:dartpad_frontend/features/shared/task_status.dart';
 import 'package:dartpad_frontend/features/shared/unthrottled_timer.dart';
 import 'package:dartpad_frontend/features/startup/project_loader.dart';
+import 'package:dartpad_frontend/features/webmcp/components/connect_agent_dialog.dart';
 import 'package:dartpad_frontend/features/webmcp/dartpad_mcp_controller.dart';
+import 'package:dartpad_frontend/features/webmcp/webmcp_models.dart';
 import 'package:dartpad_frontend/features/workspace/data/workspace_repository.dart';
 import 'package:dartpad_frontend/features/workspace/workspace_session.dart';
 import 'package:dartpad_frontend/sdks.g.dart';
@@ -231,5 +233,63 @@ void main() {
     expect(active.isActive, isFalse);
     expect(active.tick, 1);
     expect(cancelledFired, isFalse);
+  });
+
+  test('enableLocalBridge and disableLocalBridge update statusListenable without page reload', () {
+    expect(controller.status.phase, McpConnectionPhase.disabled);
+    expect(controller.status.port, 8787);
+
+    final observed = <McpBridgeStatus>[];
+    void record() => observed.add(controller.status);
+    controller.statusListenable.addListener(record);
+    addTearDown(() => controller.statusListenable.removeListener(record));
+
+    controller.enableLocalBridge(port: 9123);
+    expect(controller.status.phase, McpConnectionPhase.connecting);
+    expect(controller.status.port, 9123);
+    expect(controller.status.endpoint, Uri.parse('ws://127.0.0.1:9123/mcp-ws'));
+
+    controller.disableLocalBridge();
+    expect(controller.status.phase, McpConnectionPhase.disabled);
+    expect(controller.status.port, 9123);
+    expect(controller.status.endpoint, isNull);
+    expect(observed.length, greaterThanOrEqualTo(2));
+  });
+
+  test('detectLocalBridgeBrowserWarning and buildAgentBootstrapPrompt cover browser and CLI invariants', () {
+    expect(
+      detectLocalBridgeBrowserWarning(
+        protocol: 'http:',
+        userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15',
+      ),
+      isNull,
+    );
+
+    final safariHttps = detectLocalBridgeBrowserWarning(
+      protocol: 'https:',
+      userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15',
+    );
+    expect(safariHttps, isNotNull);
+    expect(safariHttps!.isBlockingError, isTrue);
+    expect(safariHttps.message, contains('Safari blocks https://'));
+
+    final chromeHttps = detectLocalBridgeBrowserWarning(
+      protocol: 'https:',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',
+    );
+    expect(chromeHttps, isNotNull);
+    expect(chromeHttps!.isBlockingError, isFalse);
+    expect(chromeHttps.message, contains('Local Network Access'));
+
+    final prompt = buildAgentBootstrapPrompt(
+      port: 8788,
+      sessionId: '7',
+      starterTask: AgentStarterTask.materialMakeover,
+    );
+    expect(prompt, contains('ws://127.0.0.1:8788/mcp-ws'));
+    expect(prompt, contains("dart run '$dartPadMcpGitSpec' --port 8788"));
+    expect(prompt, contains('python3 /tmp/dartpad_mcp_server.py status --port 8788 --require-tab'));
+    expect(prompt, contains('--session 7'));
+    expect(prompt, contains(AgentStarterTask.materialMakeover.instruction));
   });
 }

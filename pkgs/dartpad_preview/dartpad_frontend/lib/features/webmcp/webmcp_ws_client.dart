@@ -19,6 +19,8 @@ final class WebMcpWsClient {
     required this.getSessionId,
     required this.getPageUrl,
     this.reconnectDelay = const Duration(seconds: 1),
+    this.onConnectionChanged,
+    this.onToolActivity,
   }) : _tools = List<WebMcpToolSpec>.unmodifiable(tools),
        _toolsByName = <String, WebMcpToolSpec>{
          for (final tool in tools) tool.name: tool,
@@ -30,10 +32,13 @@ final class WebMcpWsClient {
   final String? Function() getSessionId;
   final String Function() getPageUrl;
   final Duration reconnectDelay;
+  final void Function({required bool isConnected})? onConnectionChanged;
+  final void Function(String toolName, {required bool started})? onToolActivity;
 
   web.WebSocket? _socket;
   Timer? _reconnectTimer;
   bool _disposed = false;
+  bool _isConnected = false;
   String? _lastAnnouncedSessionId;
   String? _lastAnnouncedUrl;
 
@@ -77,6 +82,10 @@ final class WebMcpWsClient {
         // Ignore close errors during teardown.
       }
     }
+    if (_isConnected) {
+      _isConnected = false;
+      onConnectionChanged?.call(isConnected: false);
+    }
   }
 
   void _connect() {
@@ -97,6 +106,10 @@ final class WebMcpWsClient {
         return;
       }
       _sendHello(socket);
+      if (!_isConnected) {
+        _isConnected = true;
+        onConnectionChanged?.call(isConnected: true);
+      }
     }).toJS;
     socket.onmessage = ((web.MessageEvent event) {
       final raw = event.data;
@@ -107,6 +120,10 @@ final class WebMcpWsClient {
     socket.onclose = ((web.CloseEvent _) {
       if (identical(_socket, socket)) {
         _socket = null;
+        if (_isConnected) {
+          _isConnected = false;
+          onConnectionChanged?.call(isConnected: false);
+        }
         _scheduleReconnect();
       }
     }).toJS;
@@ -212,6 +229,7 @@ final class WebMcpWsClient {
     }
     final rawArgs = params['arguments'];
     final arguments = rawArgs is Map ? Map<String, Object?>.from(rawArgs) : const <String, Object?>{};
+    onToolActivity?.call(name, started: true);
     try {
       final result = await spec.handler(arguments);
       return <String, Object?>{
@@ -230,6 +248,8 @@ final class WebMcpWsClient {
       };
     } catch (error) {
       return _buildCallToolError(id, error.toString());
+    } finally {
+      onToolActivity?.call(name, started: false);
     }
   }
 

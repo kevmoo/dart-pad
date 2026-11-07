@@ -551,10 +551,87 @@ async def run_tests() -> None:
             assert stdio_rc == 0
             print("[PASS] `--stdio --connect-http` clean stdin/stdout round-trips verified")
 
+            # 6b. CLI subcommands (`status`, `tools`, `call --stdin --session`) + `--stdio` active-port auto-attach
+            st_cli = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, SERVER_SCRIPT, "status", "--port", str(port), "--require-tab"],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            assert st_cli.returncode == 0, f"status failed: {st_cli.stderr}"
+            st_cli_json = json.loads(st_cli.stdout)
+            assert len(st_cli_json["connectedTabs"]) == 2
+
+            tools_cli = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, SERVER_SCRIPT, "tools", "--port", str(port), "--session", "3"],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            assert tools_cli.returncode == 0, f"tools failed: {tools_cli.stderr}"
+            tools_cli_json = json.loads(tools_cli.stdout)
+            assert len(tools_cli_json["tools"]) == 9
+
+            call_cli = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    SERVER_SCRIPT,
+                    "call",
+                    "dartpad_read_file",
+                    "--stdin",
+                    "--port",
+                    str(port),
+                    "--session",
+                    "3",
+                ],
+                input='{"path": "pubspec.yaml"}',
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            assert call_cli.returncode == 0, f"call failed: {call_cli.stderr}"
+            call_cli_json = json.loads(call_cli.stdout)
+            assert call_cli_json["sessionId"] == "3"
+            assert call_cli_json["echoArgs"] == {"path": "pubspec.yaml"}
+
+            # Verify `--stdio --port <active_port>` auto-attaches to the running daemon instead of EADDRINUSE
+            auto_stdio = subprocess.Popen(
+                [sys.executable, SERVER_SCRIPT, "--stdio", "--port", str(port)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            assert auto_stdio.stdin is not None and auto_stdio.stdout is not None
+            auto_stdio.stdin.write(
+                b'{"jsonrpc":"2.0","id":201,"method":"tools/call","params":{"name":"dartpad_get_status","arguments":{"sessionId":"3"}}}\n'
+            )
+            auto_stdio.stdin.flush()
+            auto_line = await asyncio.to_thread(auto_stdio.stdout.readline)
+            auto_resp = json.loads(auto_line.decode("utf-8"))
+            assert auto_resp["id"] == 201
+            assert auto_resp["result"]["structuredContent"]["sessionId"] == "3"
+            auto_stdio.stdin.close()
+            assert (await asyncio.to_thread(auto_stdio.wait, 5.0)) == 0
+            print("[PASS] CLI subcommands (`status`, `tools`, `call --stdin`) + `--stdio` auto-attach verified")
+
             # Disconnect both tabs and verify cached `tools/list` responds immediately (<200ms)
             await tab3.disconnect()
             await tab7.disconnect()
             await asyncio.sleep(0.05)
+
+            empty_st_cli = await asyncio.to_thread(
+                subprocess.run,
+                [sys.executable, SERVER_SCRIPT, "status", "--port", str(port), "--require-tab"],
+                capture_output=True,
+                text=True,
+                timeout=10.0,
+            )
+            assert empty_st_cli.returncode == 2, (
+                f"Expected exit code 2 when --require-tab has zero tabs, got {empty_st_cli.returncode}"
+            )
 
             t0 = time.monotonic()
             _, r_cached = await asyncio.to_thread(

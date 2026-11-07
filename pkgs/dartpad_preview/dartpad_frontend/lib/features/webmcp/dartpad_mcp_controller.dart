@@ -7,6 +7,7 @@ import 'dart:convert';
 
 import 'package:dartpad/dartpad.dart';
 import 'package:dartpad_editor/dartpad_editor.dart';
+import 'package:jaspr/jaspr.dart';
 
 import '../editor/codemirror/code_mirror_tab.dart';
 import '../preview/models/preview_state.dart';
@@ -69,12 +70,7 @@ final class DartPadMcpController {
     if (connectWebSocket) {
       final wsEndpoint = QueryParameters.resolveMcpWebSocketUri(host.currentUri);
       if (wsEndpoint != null) {
-        _wsClient = WebMcpWsClient(
-          endpoint: wsEndpoint,
-          tools: tools,
-          getSessionId: () => host.sessionId,
-          getPageUrl: () => host.currentUri.toString(),
-        )..start();
+        enableLocalBridge(customEndpoint: wsEndpoint);
       }
     }
   }
@@ -96,9 +92,84 @@ final class DartPadMcpController {
   /// All registered WebMCP tool definitions in canonical order.
   late final List<WebMcpToolSpec> tools;
 
+  final ValueNotifier<McpBridgeStatus> _status = ValueNotifier(const McpBridgeStatus());
+
+  /// Reactive outbound MCP WebSocket bridge status for UI pills and dialogs.
+  ValueListenable<McpBridgeStatus> get statusListenable => _status;
+
+  McpBridgeStatus get status => _status.value;
+
   WebMcpBrowserRegistry? _browserRegistry;
   WebMcpWsClient? _wsClient;
   bool _disposed = false;
+
+  /// Starts or retargets the outbound loopback MCP WebSocket bridge in memory
+  /// without requiring a full page reload.
+  void enableLocalBridge({int port = 8787, Uri? customEndpoint}) {
+    if (_disposed) {
+      return;
+    }
+    final target =
+        customEndpoint ??
+        Uri(
+          scheme: 'ws',
+          host: '127.0.0.1',
+          port: port,
+          path: '/mcp-ws',
+        );
+    final effectivePort = target.hasPort ? target.port : port;
+    if (_wsClient?.endpoint == target && _status.value.phase != McpConnectionPhase.disabled) {
+      return;
+    }
+    _wsClient?.dispose();
+    _status.value = McpBridgeStatus(
+      phase: McpConnectionPhase.connecting,
+      port: effectivePort,
+      endpoint: target,
+    );
+    late final WebMcpWsClient client;
+    client = WebMcpWsClient(
+      endpoint: target,
+      tools: tools,
+      getSessionId: () => host.sessionId,
+      getPageUrl: () => host.currentUri.toString(),
+      onConnectionChanged: ({required isConnected}) {
+        if (_disposed || !identical(_wsClient, client)) {
+          return;
+        }
+        _status.value = _status.value.copyWith(
+          phase: isConnected ? McpConnectionPhase.connected : McpConnectionPhase.connecting,
+          activeToolCalls: isConnected ? _status.value.activeToolCalls : 0,
+        );
+      },
+      onToolActivity: (toolName, {required started}) {
+        if (_disposed || !identical(_wsClient, client)) {
+          return;
+        }
+        final current = _status.value.activeToolCalls;
+        final nextCount = started ? current + 1 : (current > 0 ? current - 1 : 0);
+        _status.value = _status.value.copyWith(
+          activeToolCalls: nextCount,
+          lastToolName: toolName,
+        );
+      },
+    );
+    _wsClient = client..start();
+  }
+
+  /// Stops outbound loopback WebSocket reconnects and marks the bridge disabled.
+  void disableLocalBridge() {
+    if (_disposed) {
+      return;
+    }
+    final currentPort = _status.value.port;
+    _wsClient?.dispose();
+    _wsClient = null;
+    _status.value = McpBridgeStatus(
+      phase: McpConnectionPhase.disabled,
+      port: currentPort,
+    );
+  }
 
   /// Invokes a tool directly by [name] (used by unit tests and internal callers).
   Future<Map<String, Object?>> callTool(
@@ -130,6 +201,7 @@ final class DartPadMcpController {
     _wsClient = null;
     _browserRegistry?.dispose();
     _browserRegistry = null;
+    _status.dispose();
   }
 
   List<WebMcpToolSpec> _buildToolSpecs() => List<WebMcpToolSpec>.unmodifiable(<WebMcpToolSpec>[

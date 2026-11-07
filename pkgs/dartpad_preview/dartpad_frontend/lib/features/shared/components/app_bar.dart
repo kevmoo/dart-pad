@@ -9,6 +9,7 @@ import 'package:web/web.dart' as web;
 import '../../../app_styles.dart';
 import '../../editor/components/small_screen_tab_bar.dart';
 import '../../startup/examples.g.dart';
+import '../../webmcp/webmcp_models.dart';
 import '../icons.dart';
 import 'dropdown_menu.dart';
 import 'icon_button.dart' as dp;
@@ -26,6 +27,8 @@ const FontFamily _headerFontFamily = .list([
 final class AppBar extends StatelessComponent {
   const AppBar({
     this.onSelectExample,
+    this.mcpStatus,
+    this.onOpenConnectAgent,
     this.isEmbedMode = false,
     this.isSmallScreen = false,
     this.smallScreenTabBar,
@@ -34,6 +37,12 @@ final class AppBar extends StatelessComponent {
 
   /// Called when the user selects an example from the New menu.
   final void Function(Example example)? onSelectExample;
+
+  /// Reactive outbound WebMCP bridge connection status for the agent pill.
+  final ValueListenable<McpBridgeStatus>? mcpStatus;
+
+  /// Opens the Connect Coding Agent modal dialog.
+  final VoidCallback? onOpenConnectAgent;
 
   /// Whether the application is running in embed mode.
   final bool isEmbedMode;
@@ -120,8 +129,9 @@ final class AppBar extends StatelessComponent {
       ]),
       // Spacer.
       const div(classes: 'app-bar-spacer', []),
-      // Right section: theme toggle + overflow menu.
+      // Right section: agent pill + theme toggle + overflow menu.
       div(classes: 'app-bar-right', [
+        if (mcpStatus != null && onOpenConnectAgent != null) _buildConnectAgentPill(mcpStatus!, onOpenConnectAgent!),
         const ThemeToggle(),
         DropdownMenu(
           trigger: const dp.IconButton(
@@ -152,6 +162,60 @@ final class AppBar extends StatelessComponent {
       appBar,
       ?smallScreenTabBar,
     ]);
+  }
+
+  Component _buildConnectAgentPill(
+    ValueListenable<McpBridgeStatus> listenable,
+    VoidCallback onPressed,
+  ) {
+    return ValueListenableBuilder<McpBridgeStatus>(
+      listenable: listenable,
+      builder: (context, status) {
+        final (pillStateClass, dotClass, label, tooltip) = switch (status.phase) {
+          McpConnectionPhase.connected when status.isBusy => (
+            'app-bar-agent-pill-connected',
+            'app-bar-agent-dot-connected',
+            'Agent busy…',
+            'Agent running ${status.lastToolName ?? 'tool'} on :${status.port}',
+          ),
+          McpConnectionPhase.connected => (
+            'app-bar-agent-pill-connected',
+            'app-bar-agent-dot-connected',
+            'Agent Connected',
+            'Coding agent connected on :${status.port} (click for options)',
+          ),
+          McpConnectionPhase.connecting => (
+            'app-bar-agent-pill-waiting',
+            'app-bar-agent-dot-waiting',
+            'Waiting :${status.port}…',
+            'Waiting for local MCP bridge on ws://127.0.0.1:${status.port}/mcp-ws',
+          ),
+          McpConnectionPhase.disabled => (
+            'app-bar-agent-pill-idle',
+            null,
+            'Connect Agent',
+            'Connect a local coding agent via WebMCP',
+          ),
+        };
+
+        return button(
+          classes: 'app-bar-agent-pill $pillStateClass',
+          attributes: {
+            'type': 'button',
+            'aria-label': label,
+            'title': tooltip,
+          },
+          onClick: onPressed,
+          [
+            if (dotClass != null)
+              span(classes: 'app-bar-agent-dot $dotClass', const [])
+            else
+              const Icon('smart_toy', size: 16),
+            if (!isSmallScreen) span(classes: 'app-bar-button-label', [.text(label)]),
+          ],
+        );
+      },
+    );
   }
 
   @css
@@ -229,6 +293,18 @@ final class AppBar extends StatelessComponent {
         css('.app-bar-divider').styles(backgroundColor: const Color('#394c60')),
         css('.app-bar-text-button').styles(color: const Color('#f3f4f6')),
         css('.app-bar-text-button:hover').styles(backgroundColor: const Color('#253446')),
+        css('.app-bar-agent-pill').styles(
+          border: .all(color: const Color('#394c60'), width: 1.px),
+          color: const Color('#f3f4f6'),
+          backgroundColor: const Color('#223040'),
+        ),
+        css('.app-bar-agent-pill:hover').styles(backgroundColor: const Color('#2b3c50')),
+        css('.app-bar-agent-pill-connected').styles(
+          border: .all(color: const Color('#2e7d32'), width: 1.px),
+        ),
+        css('.app-bar-agent-pill-waiting').styles(
+          border: .all(color: const Color('#ef6c00'), width: 1.px),
+        ),
         css('.icon-button').styles(color: const Color('#a8acad')),
         css('.icon-button:hover').styles(color: const Color('#40c4ff')),
       ]),
@@ -297,6 +373,44 @@ final class AppBar extends StatelessComponent {
     ),
     css('.app-bar-button-label').styles(
       whiteSpace: .noWrap,
+    ),
+    css('.app-bar-agent-pill').styles(
+      display: .flex,
+      padding: .symmetric(horizontal: 10.px, vertical: 5.px),
+      border: .all(color: colorBorder, width: 1.px),
+      radius: .circular(999.px),
+      cursor: .pointer,
+      alignItems: .center,
+      gap: Gap.all(6.px),
+      color: colorOnContainer,
+      fontFamily: _headerFontFamily,
+      fontSize: 12.px,
+      fontWeight: .w600,
+      backgroundColor: colorContainer,
+    ),
+    css('.app-bar-agent-pill:hover').styles(
+      backgroundColor: colorBorder,
+    ),
+    css('.app-bar-agent-pill-connected').styles(
+      border: .all(color: const Color('#2e7d32'), width: 1.px),
+    ),
+    css('.app-bar-agent-pill-waiting').styles(
+      border: .all(color: const Color('#ef6c00'), width: 1.px),
+    ),
+    css('.app-bar-agent-dot').styles(
+      display: .inlineBlock,
+      width: 8.px,
+      height: 8.px,
+      radius: .circular(99.px),
+      flex: const .shrink(0),
+    ),
+    css('.app-bar-agent-dot-connected').styles(
+      backgroundColor: const Color('#2e7d32'),
+      raw: {'box-shadow': '0 0 0 2px rgba(76, 175, 80, 0.25)'},
+    ),
+    css('.app-bar-agent-dot-waiting').styles(
+      backgroundColor: const Color('#ef6c00'),
+      raw: {'box-shadow': '0 0 0 2px rgba(251, 192, 44, 0.28)'},
     ),
   ];
 }

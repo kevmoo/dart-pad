@@ -53,7 +53,9 @@ import 'features/startup/project_loader.dart';
 import 'features/startup/project_request.dart';
 import 'features/startup/project_source.dart';
 import 'features/startup/query_parameters.dart';
+import 'features/webmcp/components/connect_agent_dialog.dart';
 import 'features/webmcp/dartpad_mcp_controller.dart';
+import 'features/webmcp/webmcp_models.dart';
 import 'features/workspace/data/workspace_repository.dart';
 import 'features/workspace/embed_message_controller.dart';
 import 'features/workspace/embed_runtime_controller.dart';
@@ -140,6 +142,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
   Uri? _failedRestoreUri;
   bool _isCommandPaletteOpen = false;
   bool _isShortcutsOpen = false;
+  bool _isConnectAgentOpen = false;
 
   SmallScreenTab _selectedSmallScreenTab = .code;
   StreamSubscription<web.Event>? _resizeSubscription;
@@ -681,10 +684,59 @@ final class _AppState extends State<App> implements DartPadMcpHost {
   /// Reflects a freshly minted session id in the address bar without pushing a
   /// new history entry, so back navigation does not land on the bare URL.
   void _writeSessionIdToUrl(ProjectRequest request, int sessionId) {
-    final query = {...request.query, QueryParameters.sessionId: '$sessionId'};
+    final liveMcpPort = Uri.tryParse(web.window.location.href)?.queryParameters[QueryParameters.mcpPort];
+    final query = <String, Object>{
+      ...request.query,
+      QueryParameters.sessionId: '$sessionId',
+      if (liveMcpPort != null && !request.query.containsKey(QueryParameters.mcpPort))
+        QueryParameters.mcpPort: liveMcpPort,
+    };
     final search = Uri(queryParameters: query).query;
     web.window.history.replaceState(null, '', search.isEmpty ? web.window.location.pathname : '?$search');
     _mcpController?.notifySessionChanged();
+  }
+
+  void _openConnectAgentDialog() {
+    final controller = _mcpController;
+    if (controller != null && controller.status.phase == McpConnectionPhase.disabled) {
+      _enableMcpBridge(controller.status.port);
+    }
+    setState(() {
+      _isConnectAgentOpen = true;
+      _isCommandPaletteOpen = false;
+      _isShortcutsOpen = false;
+    });
+  }
+
+  void _enableMcpBridge(int port) {
+    _mcpController?.enableLocalBridge(port: port);
+    _updateMcpUrlParameters(port: port);
+    _mcpController?.notifySessionChanged();
+  }
+
+  void _disableMcpBridge() {
+    _mcpController?.disableLocalBridge();
+    _updateMcpUrlParameters(port: null);
+  }
+
+  void _updateMcpUrlParameters({required int? port}) {
+    if (component.initialUri != null) {
+      return;
+    }
+    final live = Uri.tryParse(web.window.location.href);
+    if (live == null) {
+      return;
+    }
+    final updated = <String, List<String>>{
+      for (final entry in live.queryParametersAll.entries)
+        if (entry.key != QueryParameters.mcp &&
+            entry.key != QueryParameters.mcpWs &&
+            entry.key != QueryParameters.mcpPort)
+          entry.key: entry.value,
+      if (port != null) QueryParameters.mcpPort: <String>['$port'],
+    };
+    final search = Uri(queryParameters: updated).query;
+    web.window.history.replaceState(null, '', search.isEmpty ? web.window.location.pathname : '?$search');
   }
 
   void _resetWorkspace(ProjectRequest request) {
@@ -815,6 +867,15 @@ final class _AppState extends State<App> implements DartPadMcpHost {
               key: const ValueKey('footer-shortcuts-dialog'),
               onClose: () => setState(() => _isShortcutsOpen = false),
             ),
+          if (_isConnectAgentOpen && _mcpController != null)
+            ConnectAgentDialog(
+              key: const ValueKey('connect-agent-dialog'),
+              statusListenable: _mcpController!.statusListenable,
+              sessionId: sessionId,
+              onEnableBridge: _enableMcpBridge,
+              onDisableBridge: _disableMcpBridge,
+              onClose: () => setState(() => _isConnectAgentOpen = false),
+            ),
         ],
       );
     }
@@ -888,6 +949,15 @@ final class _AppState extends State<App> implements DartPadMcpHost {
             key: const ValueKey('footer-shortcuts-dialog'),
             onClose: () => setState(() => _isShortcutsOpen = false),
           ),
+        if (_isConnectAgentOpen && _mcpController != null)
+          ConnectAgentDialog(
+            key: const ValueKey('connect-agent-dialog'),
+            statusListenable: _mcpController!.statusListenable,
+            sessionId: sessionId,
+            onEnableBridge: _enableMcpBridge,
+            onDisableBridge: _disableMcpBridge,
+            onClose: () => setState(() => _isConnectAgentOpen = false),
+          ),
       ],
     );
   }
@@ -900,6 +970,8 @@ final class _AppState extends State<App> implements DartPadMcpHost {
         visible: state == PanelPresentationState.expanded,
         child: AppBar(
           isSmallScreen: !_isLargeScreen,
+          mcpStatus: _mcpController?.statusListenable,
+          onOpenConnectAgent: _openConnectAgentDialog,
           onSelectExample: _isInitializingWorkspace
               ? null
               : (example) => _resetWorkspace(ProjectRequest.example(example.id)),

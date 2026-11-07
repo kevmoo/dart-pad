@@ -51,6 +51,15 @@ curl -s http://127.0.0.1:8787/healthz
   python3 tool/dartpad_mcp_server.py --stdio --port 8787 --open-browser
   ```
 
+- **Zero-restart CLI subcommands (`status`, `tools`, `call`)** (matching
+  [`kevmoo/dartpad_mcp`](https://github.com/kevmoo/dartpad_mcp)):
+
+  ```bash
+  python3 tool/dartpad_mcp_server.py status --port 8787 --require-tab
+  python3 tool/dartpad_mcp_server.py tools --port 8787
+  python3 tool/dartpad_mcp_server.py call dartpad_get_status --port 8787
+  ```
+
 ## 4. Run Self-Tests
 
 ```bash

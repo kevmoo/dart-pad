@@ -795,6 +795,7 @@ CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, POST, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Accept, Mcp-Session-Id, Last-Event-ID",
+    "Access-Control-Allow-Private-Network": "true",
 }
 
 
@@ -1168,7 +1169,10 @@ def create_dual_stack_socket(host: str, port: int) -> socket.socket:
 
 
 def normalize_connect_http_url(url: str) -> str:
-    parsed = urllib.parse.urlsplit(url.strip())
+    raw = url.strip()
+    if "://" not in raw:
+        raw = f"http://{raw}"
+    parsed = urllib.parse.urlsplit(raw)
     path = parsed.path or "/mcp"
     if path == "/":
         path = "/mcp"
@@ -1177,9 +1181,45 @@ def normalize_connect_http_url(url: str) -> str:
     )
 
 
-def _post_mcp_http_sync(url: str, payload: Any, timeout: float) -> Any | None:
+def _resolve_client_urls(args: argparse.Namespace) -> tuple[str, str]:
+    port = args.port if args.port is not None else 8787
+    mcp_url = normalize_connect_http_url(
+        args.connect_http or f"http://127.0.0.1:{port}/mcp"
+    )
+    parsed = urllib.parse.urlsplit(mcp_url)
+    health_url = urllib.parse.urlunsplit(
+        (parsed.scheme, parsed.netloc, "/healthz", "", "")
+    )
+    return mcp_url, health_url
+
+
+def _fetch_health_sync(health_url: str, timeout: float = 1.5) -> dict[str, Any] | None:
+    req = urllib.request.Request(
+        health_url,
+        headers={"Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with NO_PROXY_OPENER.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            data = json.loads(resp.read().decode("utf-8"))
+            if isinstance(data, dict) and data.get("ok") is True:
+                return data
+    except Exception:
+        return None
+    return None
+
+
+def _post_mcp_http_sync(
+    url: str,
+    payload: Any,
+    timeout: float,
+    *,
+    retry_connect: bool = True,
+) -> Any | None:
     body = json.dumps(payload).encode("utf-8")
-    deadline = time.monotonic() + 5.0
+    deadline = time.monotonic() + (5.0 if retry_connect else 0.0)
     attempt = 0
 
     while True:
@@ -1210,7 +1250,7 @@ def _post_mcp_http_sync(url: str, payload: Any, timeout: float) -> Any | None:
             raise RuntimeError(f"HTTP {exc.code} from {url}: {raw.decode('utf-8', 'replace')}") from exc
         except urllib.error.URLError as exc:
             # Brief retry window if the daemon is still binding right at startup.
-            if time.monotonic() < deadline and attempt < 15:
+            if retry_connect and time.monotonic() < deadline and attempt < 15:
                 time.sleep(0.15)
                 continue
             raise RuntimeError(f"Cannot reach DartPad MCP bridge at {url}: {exc}") from exc
@@ -1328,6 +1368,124 @@ async def run_stdio_loop(
     stop_event.set()
 
 
+def _resolve_stdio_proxy_url(args: argparse.Namespace) -> str | None:
+    if not args.stdio:
+        return None
+    if args.connect_http:
+        return normalize_connect_http_url(args.connect_http)
+    if args.port == 0:
+        return None
+    mcp_url, health_url = _resolve_client_urls(args)
+    if _fetch_health_sync(health_url, timeout=0.8) is not None:
+        return mcp_url
+    return None
+
+
+def _print_cli_rpc_outcome(resp: Any) -> int:
+    if not isinstance(resp, dict):
+        sys.stderr.write("Unexpected empty or non-object response from MCP bridge.\n")
+        return 1
+    if isinstance(resp.get("error"), dict):
+        sys.stderr.write(json.dumps(resp["error"], indent=2) + "\n")
+        return 1
+    result = resp.get("result")
+    if isinstance(result, dict) and result.get("isError") is True:
+        sys.stderr.write(json.dumps(result, indent=2) + "\n")
+        return 1
+    payload = (
+        result["structuredContent"]
+        if isinstance(result, dict) and "structuredContent" in result
+        else result
+    )
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+    return 0
+
+
+def run_cli_subcommand(args: argparse.Namespace) -> int:
+    pos = list(args.command_args)
+    verb = pos[0]
+    rest = pos[1:]
+    mcp_url, health_url = _resolve_client_urls(args)
+    total_timeout = args.wait_timeout + args.call_timeout + 5.0
+
+    if verb == "status":
+        if rest:
+            sys.stderr.write(f"Unexpected extra arguments for `status`: {' '.join(rest)}\n")
+            return 64
+        health = _fetch_health_sync(health_url, timeout=2.5)
+        if health is None:
+            sys.stderr.write(f"No DartPad MCP bridge reachable at {health_url}.\n")
+            return 1
+        sys.stdout.write(json.dumps(health, indent=2) + "\n")
+        tabs = health.get("connectedTabs")
+        if args.require_tab and (not isinstance(tabs, list) or len(tabs) == 0):
+            return 2
+        return 0
+
+    if verb == "tools":
+        if rest:
+            sys.stderr.write(f"Unexpected extra arguments for `tools`: {' '.join(rest)}\n")
+            return 64
+        params: dict[str, Any] = {}
+        if args.session:
+            params["sessionId"] = args.session
+        try:
+            resp = _post_mcp_http_sync(
+                mcp_url,
+                {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": params},
+                total_timeout,
+                retry_connect=False,
+            )
+        except Exception as exc:
+            sys.stderr.write(f"Failed querying tools at {mcp_url}: {exc}\n")
+            return 1
+        return _print_cli_rpc_outcome(resp)
+
+    if verb == "call":
+        if not rest or len(rest) > 2:
+            sys.stderr.write(
+                "Usage: dartpad_mcp_server.py call <tool_name> [json_args] [--stdin]\n"
+            )
+            return 64
+        if args.stdin and len(rest) > 1:
+            sys.stderr.write("Pass either [json_args] or --stdin to `call`, not both.\n")
+            return 64
+        tool_name = rest[0]
+        raw_args = sys.stdin.read() if args.stdin else (rest[1] if len(rest) == 2 else "{}")
+        stripped = raw_args.strip()
+        try:
+            parsed_args = json.loads(stripped) if stripped else {}
+        except Exception as exc:
+            sys.stderr.write(f"Invalid JSON tool arguments: {exc}\n")
+            return 64
+        if not isinstance(parsed_args, dict):
+            sys.stderr.write("Invalid JSON tool arguments: expected a JSON object (`{...}`).\n")
+            return 64
+        if args.session and "sessionId" not in parsed_args:
+            parsed_args["sessionId"] = args.session
+        try:
+            resp = _post_mcp_http_sync(
+                mcp_url,
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": tool_name, "arguments": parsed_args},
+                },
+                total_timeout,
+                retry_connect=False,
+            )
+        except Exception as exc:
+            sys.stderr.write(f"Failed calling {tool_name} at {mcp_url}: {exc}\n")
+            return 1
+        return _print_cli_rpc_outcome(resp)
+
+    sys.stderr.write(
+        f"Unknown command {verb!r}. Expected `serve`, `status`, `tools`, or `call`.\n"
+    )
+    return 64
+
+
 async def async_main(args: argparse.Namespace) -> int:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -1337,15 +1495,15 @@ async def async_main(args: argparse.Namespace) -> int:
         except NotImplementedError:
             pass
 
-    # Mode A: `--stdio --connect-http <URL>` pure stdio -> Streamable HTTP proxy.
-    if args.stdio and args.connect_http:
-        target_url = normalize_connect_http_url(args.connect_http)
+    # Mode A: `--stdio` forwarding to `--connect-http <URL>` or an already-active bridge on `:port`.
+    proxy_url = await asyncio.to_thread(_resolve_stdio_proxy_url, args)
+    if proxy_url is not None:
         total_timeout = args.wait_timeout + args.call_timeout + 10.0
-        log_err(f"Starting stdio MCP client forwarding to {target_url}")
+        log_err(f"Starting stdio MCP client forwarding to {proxy_url}")
 
         async def forward_http(msg: Any) -> Any | None:
             return await asyncio.to_thread(
-                _post_mcp_http_sync, target_url, msg, total_timeout
+                _post_mcp_http_sync, proxy_url, msg, total_timeout
             )
 
         await run_stdio_loop(forward_http, stop_event=stop_event)
@@ -1353,9 +1511,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
     # Mode B: Start dual-stack HTTP + `/mcp-ws` + `/mcp` + `/healthz` hub
     # (either standalone daemon or combined with `--stdio`).
-    port = args.port
-    if port is None:
-        port = 0 if args.stdio else 8787
+    port = args.port if args.port is not None else 8787
 
     hub = BridgeHub(
         static_dir=os.path.abspath(args.static_dir),
@@ -1400,7 +1556,15 @@ async def async_main(args: argparse.Namespace) -> int:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Zero-dependency DartPad Preview WebMCP Server & Relay Bridge."
+        description=(
+            "Zero-dependency DartPad Preview WebMCP Server, Relay Bridge & CLI "
+            "(`serve`, `status`, `tools`, `call`)."
+        )
+    )
+    parser.add_argument(
+        "command_args",
+        nargs="*",
+        help="Optional CLI subcommand: `serve` (default), `status`, `tools`, or `call <tool> [json]`.",
     )
     parser.add_argument(
         "--host",
@@ -1411,7 +1575,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--port",
         type=int,
         default=None,
-        help="TCP port to listen on (default: 8787 for daemon, 0/auto for --stdio).",
+        help="TCP port to listen on or query (default: 8787).",
     )
     parser.add_argument(
         "--static-dir",
@@ -1421,12 +1585,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--stdio",
         action="store_true",
-        help="Enable standard MCP JSON-RPC 2.0 over stdin/stdout (logs go to stderr).",
+        help="Enable standard MCP JSON-RPC 2.0 over stdin/stdout (auto-attaches if :port is active).",
     )
     parser.add_argument(
         "--connect-http",
         default=None,
-        help="In --stdio mode, forward MCP requests to a running bridge's http://...:<PORT>/mcp.",
+        help="Forward stdio or CLI requests to a running bridge's http://...:<PORT>/mcp.",
+    )
+    parser.add_argument(
+        "--session",
+        default=None,
+        help="Target a specific DartPad tab sessionId (`s` query param) in `tools` or `call`.",
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="Read JSON arguments object from stdin for `call`.",
+    )
+    parser.add_argument(
+        "--require-tab",
+        action="store_true",
+        help="Exit with code 2 from `status` when zero DartPad tabs are connected.",
     )
     parser.add_argument(
         "--open-browser",
@@ -1455,11 +1634,19 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Optional file path to write the bound TCP port once listening.",
     )
+    if hasattr(parser, "parse_intermixed_args"):
+        return parser.parse_intermixed_args(argv)
     return parser.parse_args(argv)
 
 
-def main() -> None:
-    args = parse_args()
+def main(argv: list[str] | None = None) -> None:
+    args = parse_args(argv)
+    pos = list(args.command_args)
+    if pos and pos[0] != "serve":
+        sys.exit(run_cli_subcommand(args))
+    if len(pos) > 1:
+        sys.stderr.write(f"Unexpected extra arguments for `serve`: {' '.join(pos[1:])}\n")
+        sys.exit(64)
     try:
         code = asyncio.run(async_main(args))
     except KeyboardInterrupt:
