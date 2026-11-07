@@ -1,4 +1,13 @@
-# DartPad Preview
+# DartPad Preview (`kevmoo/dart-pad` — Unofficial WebMCP Fork)
+
+> [!WARNING]
+>
+> **Unofficial Experimental Fork**: This branch (`webmcp-prototype`) is a
+> personal prototype exploring WebMCP and local coding-agent connectivity
+> ([dartpad-webmcp.web.app](https://dartpad-webmcp.web.app/)). For the official
+> DartPad Preview, visit **[preview.dartpad.dev](https://preview.dartpad.dev/)**
+> (upstream repository:
+> [dart-lang/dart-pad](https://github.com/dart-lang/dart-pad)).
 
 DartPad Preview lets users edit and run Dart and Flutter code in the browser,
 with analysis and compilation running locally in a WebWorker. This workspace
@@ -33,7 +42,8 @@ Choose one source per URL.
   `root=example&file=example/lib/main.dart`.
 - Gists move root-level Dart files into `lib/`; original paths such as
   `file=main.dart&entrypoint=main.dart` still work.
-- SDK versions must be available in the [bundled SDK list](dartpad_frontend/lib/sdks.g.dart).
+- SDK versions must be available in the
+  [bundled SDK list](dartpad_frontend/lib/sdks.g.dart).
 
 ### Appearance and execution
 
@@ -46,12 +56,12 @@ Choose one source per URL.
 ### Panel configuration
 
 The URL sets each panel's initial state, but these are interpreted as hints.
-Existing panel controls can change the layout afterwards. The app bar and status bar
-do not have their own reopening controls.
+Existing panel controls can change the layout afterwards. The app bar and status
+bar do not have their own reopening controls.
 
-Use comma-separated panel names, each prefixed with `+` or `-`.
-`+` expands a panel. `-` collapses it in standalone mode and hides it in embeds.
-The exception is `-tabs`, which hides tabs and breadcrumbs in both modes.
+Use comma-separated panel names, each prefixed with `+` or `-`. `+` expands a
+panel. `-` collapses it in standalone mode and hides it in embeds. The exception
+is `-tabs`, which hides tabs and breadcrumbs in both modes.
 
 ```text
 ?embed=true&panels=+tabs,-filetree,-preview
@@ -68,16 +78,22 @@ The exception is `-tabs`, which hides tabs and breadcrumbs in both modes.
 | `appbar`    | Expanded           | Hidden                                                      |
 
 Tabs and breadcrumbs are shown together whenever multiple files are open, even
-with `-tabs`, so users can switch between files. When only one file remains open,
-they return to the configured visibility.
+with `-tabs`, so users can switch between files. When only one file remains
+open, they return to the configured visibility.
 
 #### Bottom panel behavior
 
 `console` and `problems` share the bottom area:
 
-- The bottom area expands if either resolved tab is expanded, otherwise collapses if either is collapsed, otherwise hides. In embeds, hiding requires `-console,-problems`.
-- The last positive hint (`+console` or `+problems`) selects that tab. Without a positive hint, the more visible tab is selected (for example, `-console` in standalone selects Problems).
-- In standalone mode, a single negative hint (`-console` or `-problems`) keeps the area expanded and selects the other tab; both must be `-` to collapse the area.
+- The bottom area expands if either resolved tab is expanded, otherwise
+  collapses if either is collapsed, otherwise hides. In embeds, hiding requires
+  `-console,-problems`.
+- The last positive hint (`+console` or `+problems`) selects that tab. Without a
+  positive hint, the more visible tab is selected (for example, `-console` in
+  standalone selects Problems).
+- In standalone mode, a single negative hint (`-console` or `-problems`) keeps
+  the area expanded and selects the other tab; both must be `-` to collapse the
+  area.
 
 ### Examples
 
@@ -113,8 +129,10 @@ dart run jaspr_cli:jaspr serve -v
 ```
 
 - Open <http://localhost:8080/>.
-- SDK assets and example archives only need regenerating when missing or changed.
-- See [Development details](dartpad_frontend/doc/development.md) for asset updates and CodeMirror builds.
+- SDK assets and example archives only need regenerating when missing or
+  changed.
+- See [Development details](dartpad_frontend/doc/development.md) for asset
+  updates and CodeMirror builds.
 
 Frontend checks and builds, from `dartpad_frontend`:
 

@@ -24,12 +24,19 @@ void main() {
     expect(newButton.disabled, isTrue);
   });
 
-  testClient('renders preview ribbon, logo and DartPad title', (tester) {
+  testClient('renders fork banner, fork ribbon, logo and DartPad title', (tester) {
     tester.pumpComponent(const AppBar());
+
+    final forkBanner = web.document.querySelector('.app-bar-fork-banner');
+    expect(forkBanner, isNotNull);
+    expect(forkBanner!.textContent, contains('Unofficial experimental WebMCP fork'));
+    final officialLink = web.document.querySelector('.app-bar-fork-official-cta') as web.HTMLAnchorElement?;
+    expect(officialLink, isNotNull);
+    expect(officialLink!.href, 'https://preview.dartpad.dev/');
 
     final ribbon = web.document.querySelector('.app-bar-preview-ribbon');
     expect(ribbon, isNotNull);
-    expect(ribbon!.textContent, 'PREVIEW');
+    expect(ribbon!.textContent, 'FORK');
 
     final logo = web.document.querySelector('.app-bar-logo') as web.HTMLImageElement?;
     expect(logo, isNotNull);
@@ -114,13 +121,17 @@ void main() {
     expect(menu, isNotNull);
 
     final items = menu!.querySelectorAll('button.dropdown-menu-item');
-    expect(items.length, 2);
+    expect(items.length, 3);
 
-    final firstItem = items.item(0)! as web.HTMLButtonElement;
+    final officialItem = items.item(0)! as web.HTMLButtonElement;
+    expect(officialItem.textContent, contains('Official preview.dartpad.dev'));
+    expect(officialItem.textContent, contains('launch'));
+
+    final firstItem = items.item(1)! as web.HTMLButtonElement;
     expect(firstItem.textContent, contains('Install SDK'));
     expect(firstItem.textContent, contains('launch'));
 
-    final secondItem = items.item(1)! as web.HTMLButtonElement;
+    final secondItem = items.item(2)! as web.HTMLButtonElement;
     expect(secondItem.textContent, contains('Sharing guide'));
     expect(secondItem.textContent, contains('launch'));
 

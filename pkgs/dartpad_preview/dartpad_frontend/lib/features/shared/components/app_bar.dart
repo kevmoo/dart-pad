@@ -92,13 +92,50 @@ final class AppBar extends StatelessComponent {
     };
   }
 
+  Component _buildForkBanner() {
+    return div(
+      classes: 'app-bar-fork-banner',
+      attributes: const {'role': 'region', 'aria-label': 'Unofficial fork notice'},
+      [
+        div(classes: 'app-bar-fork-banner-text', [
+          const Icon('warning', size: 15),
+          if (isSmallScreen)
+            const span([.text('Unofficial WebMCP fork —')])
+          else
+            const span([
+              strong([.text('Unofficial experimental WebMCP fork')]),
+              .text(' ('),
+              a(
+                href: 'https://github.com/kevmoo/dart-pad/tree/webmcp-prototype',
+                target: Target.blank,
+                classes: 'app-bar-fork-repo-link',
+                attributes: {'rel': 'noopener noreferrer'},
+                [.text('kevmoo/dart-pad')],
+              ),
+              .text(') — Not the official DartPad.'),
+            ]),
+        ]),
+        const a(
+          href: 'https://preview.dartpad.dev/',
+          target: Target.blank,
+          classes: 'app-bar-fork-official-cta',
+          attributes: {'rel': 'noopener noreferrer'},
+          [
+            span([.text('Official preview.dartpad.dev')]),
+            Icon('open_in_new', size: 13),
+          ],
+        ),
+      ],
+    );
+  }
+
   Component _buildAppBar([SmallScreenTabBar? smallScreenTabBar]) {
     final isNewDisabled = onSelectExample == null;
 
     final appBar = div(classes: 'app-bar', [
-      // Flutter-style preview corner ribbon overlay.
+      // Fork corner ribbon overlay.
       const div(classes: 'app-bar-preview-ribbon-wrapper', [
-        div(classes: 'app-bar-preview-ribbon', [.text('PREVIEW')]),
+        div(classes: 'app-bar-preview-ribbon', [.text('FORK')]),
       ]),
       // Left section: logo + title + new menu.
       div(classes: 'app-bar-left', [
@@ -142,6 +179,11 @@ final class AppBar extends StatelessComponent {
           ),
           items: [
             DropdownMenuItem(
+              label: 'Official preview.dartpad.dev',
+              trailingIcon: 'launch',
+              onPressed: () => _openLink('https://preview.dartpad.dev/'),
+            ),
+            DropdownMenuItem(
               label: 'Install SDK',
               trailingIcon: 'launch',
               onPressed: () => _openLink('https://flutter.dev/get-started'),
@@ -159,6 +201,7 @@ final class AppBar extends StatelessComponent {
     ]);
 
     return div(classes: 'app-bar-container', [
+      _buildForkBanner(),
       appBar,
       ?smallScreenTabBar,
     ]);
@@ -256,6 +299,51 @@ final class AppBar extends StatelessComponent {
       overflow: .hidden,
       raw: {'pointer-events': 'none'},
     ),
+    css('.app-bar-fork-banner').styles(
+      display: .flex,
+      minHeight: 30.px,
+      padding: .symmetric(vertical: 4.px, horizontal: 14.px),
+      border: .only(
+        bottom: .solid(color: const Color('#d97706'), width: 1.px),
+      ),
+      flexWrap: .wrap,
+      justifyContent: .center,
+      alignItems: .center,
+      gap: Gap.all(10.px),
+      color: const Color('#78350f'),
+      fontFamily: _headerFontFamily,
+      fontSize: 12.px,
+      lineHeight: 1.35.em,
+      backgroundColor: const Color('#fffbeb'),
+    ),
+    css('.app-bar-fork-banner-text').styles(
+      display: .inlineFlex,
+      flexWrap: .wrap,
+      alignItems: .center,
+      gap: Gap.all(4.px),
+    ),
+    css('.app-bar-fork-repo-link').styles(
+      color: const Color('#92400e'),
+      fontWeight: .w600,
+      textDecoration: const TextDecoration(line: .underline),
+    ),
+    css('.app-bar-fork-official-cta').styles(
+      display: .inlineFlex,
+      padding: .symmetric(vertical: 2.px, horizontal: 9.px),
+      border: .all(color: const Color('#d97706'), width: 1.px),
+      radius: .circular(999.px),
+      alignItems: .center,
+      gap: Gap.all(4.px),
+      color: const Color('#78350f'),
+      fontSize: 11.5.px,
+      fontWeight: .w700,
+      textDecoration: TextDecoration.none,
+      whiteSpace: .noWrap,
+      backgroundColor: const Color('#fde68a'),
+    ),
+    css('.app-bar-fork-official-cta:hover').styles(
+      backgroundColor: const Color('#fcd34d'),
+    ),
     css('.app-bar-preview-ribbon').styles(
       position: const .absolute(),
       width: 95.px,
@@ -272,7 +360,7 @@ final class AppBar extends StatelessComponent {
       fontSize: 8.5.px,
       fontWeight: .w900,
       letterSpacing: 1.2.px,
-      backgroundColor: const Color('#8B2635'),
+      backgroundColor: const Color('#b45309'),
       raw: {
         'top': '14px',
         'left': '-28px',
@@ -282,6 +370,24 @@ final class AppBar extends StatelessComponent {
     ),
     // Dark theme styles matching dart.dev chrome.
     css('html[data-theme="dark"]', [
+      css('.app-bar-fork-banner').styles(
+        border: .only(
+          bottom: .solid(color: const Color('#b45309'), width: 1.px),
+        ),
+        color: const Color('#fef3c7'),
+        backgroundColor: const Color('#2d1f0a'),
+      ),
+      css('.app-bar-fork-repo-link').styles(
+        color: const Color('#fcd34d'),
+      ),
+      css('.app-bar-fork-official-cta').styles(
+        border: .all(color: const Color('#d97706'), width: 1.px),
+        color: const Color('#fef3c7'),
+        backgroundColor: const Color('#452c0c'),
+      ),
+      css('.app-bar-fork-official-cta:hover').styles(
+        backgroundColor: const Color('#5c3b10'),
+      ),
       css('.app-bar', [
         css('&').styles(
           border: .only(
