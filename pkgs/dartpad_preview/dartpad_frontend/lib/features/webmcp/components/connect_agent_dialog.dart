@@ -64,6 +64,7 @@ final class AgentBrowserNotice {
 AgentBrowserNotice? detectLocalBridgeBrowserWarning({
   required String protocol,
   required String userAgent,
+  int port = 8787,
 }) {
   if (protocol != 'https:') {
     return null;
@@ -84,12 +85,24 @@ AgentBrowserNotice? detectLocalBridgeBrowserWarning({
           'Open this URL in Chrome to connect a local CLI coding agent.',
     );
   }
-  return const AgentBrowserNotice(
+  return AgentBrowserNotice(
     isBlockingError: false,
     message:
-        'If Chrome prompts for Local Network Access, click Allow so this tab can connect '
-        'to 127.0.0.1.',
+        'Click Allow if Chrome prompts for Local Network Access so this tab can reach '
+        '127.0.0.1:$port. If your agent runs on a remote SSH/Cloudtop host, forward '
+        'port $port (ssh -L $port:127.0.0.1:$port).',
   );
+}
+
+String _buildConnectablePageUrl(String rawHref, int port) {
+  final parsed = Uri.tryParse(rawHref);
+  if (parsed == null || (!parsed.isScheme('http') && !parsed.isScheme('https'))) {
+    return 'https://dartpad-webmcp.web.app/?mcp_port=$port';
+  }
+  final params = Map<String, String>.from(parsed.queryParameters);
+  params.remove('mcp');
+  params['mcp_port'] = '$port';
+  return parsed.replace(queryParameters: params).toString();
 }
 
 /// Builds a self-contained bootstrap prompt that lets a user's coding agent start
@@ -98,20 +111,28 @@ String buildAgentBootstrapPrompt({
   required int port,
   required String? sessionId,
   required AgentStarterTask starterTask,
+  String? pageUrl,
 }) {
   final sessionClause = (sessionId != null && sessionId.isNotEmpty) ? ' (session s=$sessionId)' : '';
   final sessionFlag = (sessionId != null && sessionId.isNotEmpty) ? ' --session $sessionId' : '';
+  final defaultQuery = (sessionId != null && sessionId.isNotEmpty) ? 's=$sessionId&mcp_port=$port' : 'mcp_port=$port';
+  final targetTabUrl = (pageUrl != null && pageUrl.isNotEmpty)
+      ? pageUrl
+      : 'https://dartpad-webmcp.web.app/?$defaultQuery';
   return '''
-Connect to my open DartPad Preview browser tab$sessionClause, which is waiting on `ws://127.0.0.1:$port/mcp-ws`:
+Connect to my DartPad Preview browser tab at $targetTabUrl$sessionClause, which dials `ws://127.0.0.1:$port/mcp-ws` on the browser's machine:
+(If you are running on a remote SSH/Cloudtop host instead of the machine running my browser, ask me to forward port $port via `ssh -L $port:127.0.0.1:$port` or run the bridge locally.)
 
 1. Start the zero-dependency local MCP bridge in the background on port $port (skip if `http://127.0.0.1:$port/healthz` already responds):
    - Preferred (Dart 3.12+): `dart run '$dartPadMcpGitSpec' --port $port`
    - Fallback (if standalone `dart` is unavailable): `curl -fsSL $dartPadMcpPythonUrl -o /tmp/dartpad_mcp_server.py && python3 /tmp/dartpad_mcp_server.py --port $port`
-2. Verify my DartPad tab is connected (`connectedTabs` non-empty):
+2. Wait ~1-2s for the open tab's auto-reconnect loop, then verify `connectedTabs` is non-empty:
    `dart run '$dartPadMcpGitSpec' status --port $port --require-tab` (or `python3 /tmp/dartpad_mcp_server.py status --port $port --require-tab`)
-3. Register `http://127.0.0.1:$port/mcp` (Streamable HTTP) or `--stdio` as an MCP server if supported, AND call DartPad tools immediately right now without restarting (using `CLI="dart run '$dartPadMcpGitSpec'"` or `CLI="python3 /tmp/dartpad_mcp_server.py"`):
-   - List tools: `\$CLI tools --port $port$sessionFlag`
-   - Call a tool: `\$CLI call <tool_name> --stdin --port $port$sessionFlag << 'EOF'` with JSON args (`dartpad_get_status`, `dartpad_list_files`, `dartpad_read_file`, `dartpad_write_files`, `dartpad_get_diagnostics`, `dartpad_pub`, `dartpad_run_or_reload`, `dartpad_get_logs`, `dartpad_inspect_widget_tree`).
+   - If `connectedTabs` is empty (exit code 2): open `$targetTabUrl` in Chrome if no tab is open yet, or if the tab is open on `https://`, ask me to click **Allow** on Chrome's Local Network Access prompt in the address bar (Safari blocks `https://` -> `ws://127.0.0.1`), then re-run `status --require-tab`.
+3. Register `http://127.0.0.1:$port/mcp` (Streamable HTTP) or `--stdio` as an MCP server if supported, AND call DartPad tools immediately right now without restarting:
+   - List tools and exact JSON schemas first: `dart run '$dartPadMcpGitSpec' tools --port $port$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py tools --port $port$sessionFlag`)
+   - Call a tool with JSON args matching `inputSchema` (e.g. `dartpad_write_files` takes `{"files":[{"path":"lib/main.dart","content":"..."}]}`):
+     `dart run '$dartPadMcpGitSpec' call <tool_name> --stdin --port $port$sessionFlag << 'EOF'`
 4. Task: ${starterTask.instruction}''';
 }
 
@@ -239,18 +260,19 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
 
   @override
   Component build(BuildContext context) {
-    final browserNotice = detectLocalBridgeBrowserWarning(
-      protocol: web.window.location.protocol,
-      userAgent: web.window.navigator.userAgent,
-    );
-
     return ValueListenableBuilder<McpBridgeStatus>(
       listenable: component.statusListenable,
       builder: (context, status) {
+        final browserNotice = detectLocalBridgeBrowserWarning(
+          protocol: web.window.location.protocol,
+          userAgent: web.window.navigator.userAgent,
+          port: status.port,
+        );
         final prompt = buildAgentBootstrapPrompt(
           port: status.port,
           sessionId: component.sessionId,
           starterTask: _selectedTask,
+          pageUrl: _buildConnectablePageUrl(web.window.location.href, status.port),
         );
         final parsedPort = int.tryParse(_portInput.trim());
         final canApplyPort = parsedPort != null && parsedPort > 0 && parsedPort <= 65535 && parsedPort != status.port;
@@ -449,7 +471,7 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
           _buildCommandRow('Register in Claude Code', 'claude-mcp', claudeMcpCmd),
           const div(classes: 'connect-agent-download-row', [
             span(classes: 'connect-agent-download-hint', [
-              .text('Behind SSO or offline? Download the zero-dependency dart:io script directly:'),
+              .text('No Git access or offline? Download the zero-dependency dart:io script directly:'),
             ]),
             a(
               href: 'mcp/dartpad_mcp.txt',

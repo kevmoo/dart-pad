@@ -276,19 +276,28 @@ void main() {
     final chromeHttps = detectLocalBridgeBrowserWarning(
       protocol: 'https:',
       userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',
+      port: 8788,
     );
     expect(chromeHttps, isNotNull);
     expect(chromeHttps!.isBlockingError, isFalse);
     expect(chromeHttps.message, contains('Local Network Access'));
+    expect(chromeHttps.message, contains('ssh -L 8788:127.0.0.1:8788'));
 
     final prompt = buildAgentBootstrapPrompt(
       port: 8788,
       sessionId: '7',
       starterTask: AgentStarterTask.materialMakeover,
+      pageUrl: 'https://dartpad-webmcp.web.app/?s=7&mcp_port=8788',
     );
+    expect(prompt, contains('https://dartpad-webmcp.web.app/?s=7&mcp_port=8788'));
     expect(prompt, contains('ws://127.0.0.1:8788/mcp-ws'));
+    expect(prompt, contains('ssh -L 8788:127.0.0.1:8788'));
+    expect(prompt, contains('Local Network Access'));
     expect(prompt, contains("dart run '$dartPadMcpGitSpec' --port 8788"));
     expect(prompt, contains('python3 /tmp/dartpad_mcp_server.py status --port 8788 --require-tab'));
+    expect(prompt, contains("dart run '$dartPadMcpGitSpec' tools --port 8788 --session 7"));
+    expect(prompt, contains("dart run '$dartPadMcpGitSpec' call <tool_name> --stdin --port 8788 --session 7"));
+    expect(prompt, isNot(contains(r'$CLI')));
     expect(prompt, contains('--session 7'));
     expect(prompt, contains(AgentStarterTask.materialMakeover.instruction));
   });
