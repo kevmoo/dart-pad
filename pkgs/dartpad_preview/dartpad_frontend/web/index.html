@@ -7,6 +7,18 @@
         <meta name="scaffolded-by" content="https://github.com/schultek/jaspr">
 
         <title>DartPad</title>
+        <script>
+            // Ensure subpath deployments served without a trailing slash (e.g.
+            // /hosting/<id>) resolve relative assets inside the app directory.
+            (function() {
+                var p = location.pathname;
+                if (!p.endsWith('/') && !p.endsWith('.html')) {
+                    var base = document.createElement('base');
+                    base.href = p + '/';
+                    document.head.appendChild(base);
+                }
+            })();
+        </script>
         <link rel="icon" type="image/png" href="favicon.png">
 
         <!-- Loads the generated CSS file. -->

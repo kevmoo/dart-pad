@@ -3,8 +3,9 @@
 Legacy compatibility for existing Flutter API documentation embeds only.
 New integrations should use the current project sources with embed=true.
 
-The redirect replaces the path with / and sets embed=true, preserving the other
-query parameters and fragment. The application only sees this redirected URL.
+The redirect resolves to the application directory and sets embed=true,
+preserving the other query parameters and fragment. The application only sees
+this redirected URL.
 
 Deprecated sample_id selects a generated Flutter API documentation snippet.
 channel=main or channel=master loads snippets from main-api.flutter.dev; other
@@ -18,7 +19,7 @@ sample_id alone does not enable embed mode or force a particular SDK.
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>DartPad</title>
-        <script src="/embed-flutter.js"></script>
+        <script src="embed-flutter.js"></script>
     </head>
     <body></body>
 </html>

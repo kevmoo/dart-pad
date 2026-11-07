@@ -8,6 +8,7 @@ import 'dart:typed_data';
 import 'package:dartpad_editor/dartpad_editor.dart';
 import 'package:http/http.dart' as http;
 import 'package:tar/tar.dart';
+import 'package:web/web.dart' as web;
 import 'package:yaml/yaml.dart';
 
 import '../shared/flutter_api_channel.dart';

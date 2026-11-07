@@ -14,6 +14,7 @@ import 'package:dartpad_frontend/features/startup/project_source.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
+import 'package:web/web.dart' as web;
 import 'package:yaml/yaml.dart';
 
 void main() {
@@ -726,6 +727,32 @@ resolution: workspace
 
       expect(await api.readFileAsBytes('pubspec.yaml'), [0xFF]);
       expect(await api.fileExist('pubspec_overrides.yaml'), isFalse);
+    });
+
+    test('resolves relative archive URLs against document.baseURI on subpath hosts', () async {
+      final base = web.HTMLBaseElement()..href = 'https://example.com/hosting/v1/';
+      web.document.head!.appendChild(base);
+      // JS interop methods cannot be used as tear-offs.
+      // ignore: unnecessary_lambdas
+      addTearDown(() => base.remove());
+
+      final archiveBytes = createTarArchive({
+        'lib/main.dart': 'void main() {}\n',
+      });
+      final api = MemoryWorkspaceResourceApi();
+      addTearDown(api.dispose);
+
+      Uri? requestedUri;
+      await http.runWithClient(
+        () => loadInto(const ArchiveProjectSource('examples/counter.tar'), api.root),
+        () => MockClient((http.Request request) async {
+          requestedUri = request.url;
+          return http.Response.bytes(archiveBytes, 200);
+        }),
+      );
+
+      expect(requestedUri, Uri.parse('https://example.com/hosting/v1/examples/counter.tar'));
+      expect(await api.readFileAsText('lib/main.dart'), 'void main() {}\n');
     });
   });
 }

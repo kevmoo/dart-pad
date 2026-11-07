@@ -9,7 +9,7 @@ final class ArchiveProjectSource extends ProjectSource {
   /// Describes the archive at [url].
   const ArchiveProjectSource(this.url);
 
-  /// The archive URL, resolved against the page URL when relative.
+  /// The archive URL, resolved against `document.baseURI` when relative.
   final String url;
 
   @override
@@ -17,7 +17,7 @@ final class ArchiveProjectSource extends ProjectSource {
 }
 
 Future<Project> _loadArchive(String archiveUrl) async {
-  final Uri uri = Uri.base.resolve(archiveUrl);
+  final Uri uri = Uri.parse(web.document.baseURI).resolve(archiveUrl);
   if (!uri.isAbsolute) {
     throw ArgumentError('archiveUrl must resolve to an absolute URI: $archiveUrl');
   }
