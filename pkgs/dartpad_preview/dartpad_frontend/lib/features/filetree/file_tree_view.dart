@@ -30,6 +30,7 @@ final class FileTreeView extends StatefulComponent {
   const FileTreeView({
     required this.state,
     required this.actions,
+    this.onFileOpened,
     this.confirmDelete,
     this.contextMenu,
     super.key,
@@ -40,6 +41,9 @@ final class FileTreeView extends StatefulComponent {
 
   /// The actions invoked in response to user interaction.
   final FileTreeActions actions;
+
+  /// Called after a file has successfully opened or been created from the tree.
+  final VoidCallback? onFileOpened;
 
   /// An optional callback used to confirm destructive operations.
   final bool Function(String message)? confirmDelete;
@@ -251,7 +255,9 @@ final class _FileTreeViewInternalState extends State<FileTreeView> {
                 if (kind == FileTreeEntryKind.folder) {
                   await actions.createFolder(state.focusedPath, name);
                 } else {
-                  await actions.createFile(state.focusedPath, name);
+                  if (await actions.createFile(state.focusedPath, name) && mounted) {
+                    component.onFileOpened?.call();
+                  }
                 }
               },
               onCancel: () {
@@ -269,6 +275,7 @@ final class _FileTreeViewInternalState extends State<FileTreeView> {
                 depth: 0,
                 state: state,
                 actions: actions,
+                onFileOpened: component.onFileOpened,
                 selectedPath: _selectedPath,
                 onSelect: (selectedPath) {
                   setState(() {
@@ -297,7 +304,9 @@ final class _FileTreeViewInternalState extends State<FileTreeView> {
                   if (kind == FileTreeEntryKind.folder) {
                     await actions.createFolder(parentPath, name);
                   } else {
-                    await actions.createFile(parentPath, name);
+                    if (await actions.createFile(parentPath, name) && mounted) {
+                      component.onFileOpened?.call();
+                    }
                   }
                 },
                 onCancelCreate: () {
@@ -315,6 +324,7 @@ final class _FileTreeViewInternalState extends State<FileTreeView> {
                 depth: 0,
                 state: state,
                 actions: actions,
+                onFileOpened: component.onFileOpened,
                 selectedPath: _selectedPath,
                 onSelect: (selectedPath) {
                   setState(() {

@@ -13,6 +13,7 @@ import 'workspace_mode.dart';
 ///
 /// Null retains the contextual default. False collapses or hides the panel,
 /// depending on the workspace mode and the panel's available presentations.
+/// Small screens always start with the bottom panel collapsed, ignoring its hints.
 final class PanelHints {
   const PanelHints.none() : this();
 
@@ -39,9 +40,15 @@ final class PanelHints {
   /// Null leaves selection to the contextual layout defaults.
   final BottomPanelTab? preferredBottomTab;
 
-  PanelLayoutState resolve({required WorkspaceMode mode, bool? showEditorNavigation, double? previewRatio}) {
+  PanelLayoutState resolve({
+    required WorkspaceMode mode,
+    bool isSmallScreen = false,
+    bool? showEditorNavigation,
+    double? previewRatio,
+  }) {
     final defaults = panel_defaults.resolveInitialPanelLayout(
       mode: mode,
+      isSmallScreen: isSmallScreen,
       showEditorNavigation: showEditorNavigation,
       initialPreviewRatio: previewRatio,
     );
@@ -72,13 +79,16 @@ final class PanelHints {
       false => PanelPresentationState.hidden,
       null => defaults.statusBar,
     };
-    final bottom = _resolveBottomPanel(defaults.bottom, mode: WorkspaceMode.embed);
+    final bottom = defaults.layout == PanelLayout.smallScreen
+        ? defaults.bottom
+        : _resolveBottomPanel(defaults.bottom, mode: WorkspaceMode.embed);
     final editorNavigation = switch (this.editorNavigation) {
       true => PanelPresentationState.expanded,
       false => PanelPresentationState.hidden,
       null => defaults.editorNavigation,
     };
     final PanelLayoutState layout = (
+      layout: defaults.layout,
       appBar: appBar,
       statusBar: statusBar,
       preview: preview,
@@ -97,7 +107,10 @@ final class PanelHints {
     };
     final fileTree = switch (this.fileTree) {
       true => Split(defaults.fileTree.value),
-      false => LeftCollapsed(defaults.fileTree.value),
+      false =>
+        defaults.layout == PanelLayout.smallScreen
+            ? LeftHidden(defaults.fileTree.value)
+            : LeftCollapsed(defaults.fileTree.value),
       null => defaults.fileTree,
     };
     final appBar = switch (this.appBar) {
@@ -110,13 +123,16 @@ final class PanelHints {
       false => PanelPresentationState.hidden,
       null => defaults.statusBar,
     };
-    final bottom = _resolveBottomPanel(defaults.bottom, mode: WorkspaceMode.standalone);
+    final bottom = defaults.layout == PanelLayout.smallScreen
+        ? defaults.bottom
+        : _resolveBottomPanel(defaults.bottom, mode: WorkspaceMode.standalone);
     final editorNavigation = switch (this.editorNavigation) {
       true => PanelPresentationState.expanded,
       false => PanelPresentationState.hidden,
       null => defaults.editorNavigation,
     };
     final PanelLayoutState layout = (
+      layout: defaults.layout,
       appBar: appBar,
       statusBar: statusBar,
       preview: preview,

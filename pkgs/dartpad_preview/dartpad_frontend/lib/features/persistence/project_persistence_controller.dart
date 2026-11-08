@@ -68,21 +68,12 @@ final class ProjectPersistenceController extends ChangeNotifier {
     await stop();
     final history = await _readHistory();
     _sessionId = null;
-    if (request.isSourced) {
-      return _resolveSourcedRequest(request, history, startFresh: startFresh);
-    }
-    return _resolveBareRequest(history, startFresh: startFresh);
-  }
-
-  /// A bare URL always selects the single scratch project.
-  PersistenceLoadStrategy _resolveBareRequest(List<StoredProject> history, {required bool startFresh}) {
-    final scratch = startFresh ? null : history.where((entry) => entry.state.isBareProject).firstOrNull;
-    return PersistenceLoadStrategy(restoreProjectId: scratch?.id);
+    return _resolveRequest(request, history, startFresh: startFresh);
   }
 
   /// Restores the entry saved under the requested session id.
   /// Otherwise, given no or an unknown id loads the source under a newly minted id.
-  Future<PersistenceLoadStrategy> _resolveSourcedRequest(
+  Future<PersistenceLoadStrategy> _resolveRequest(
     ProjectRequest request,
     List<StoredProject> history, {
     required bool startFresh,
@@ -156,7 +147,8 @@ final class ProjectPersistenceController extends ChangeNotifier {
   /// Starts saving a prepared session. Omit [projectId] to create a new entry.
   /// Call and await [stop] before replacing an attached session.
   void attach(WorkspaceSession session, {String? projectId}) {
-    if (!_available || _disposed) {
+    final sessionId = _sessionId;
+    if (!_available || _disposed || sessionId == null) {
       return;
     }
     assert(_autosave == null && _stopping == null);
@@ -166,7 +158,7 @@ final class ProjectPersistenceController extends ChangeNotifier {
       session: session,
       store: _store!,
       projectId: projectId,
-      sessionId: _sessionId,
+      sessionId: sessionId,
       onError: (_) {
         if (identical(_autosave, autosave)) {
           _reportSaveFailure();

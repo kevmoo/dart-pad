@@ -13,6 +13,7 @@ final colorContainer = const ColorToken('container', Color('#FFFFFF'), dark: Col
 final colorOnContainer = const ColorToken('on-container', Color('#000000'), dark: Color('#FFFFFF'));
 
 final colorBorder = colorSurface.highlight(colorOnSurface, 0.05);
+const colorBackdrop = Color.rgba(0, 0, 0, 0.55);
 
 extension ColorHighlight on Color {
   Color highlight(Color overlay, double amount) {
@@ -69,6 +70,13 @@ List<StyleRule> get appStyles => [
     color: colorOnSurface,
     fontFamily: defaultFontFamily,
     backgroundColor: colorSurface,
+  ),
+  css('#app').styles(
+    boxSizing: .borderBox,
+    raw: {
+      'height': '100dvh',
+      'padding-bottom': 'env(safe-area-inset-bottom, 0px)',
+    },
   ),
   css('.glue-cookie-notification-bar').styles(
     raw: {'z-index': '99999'},

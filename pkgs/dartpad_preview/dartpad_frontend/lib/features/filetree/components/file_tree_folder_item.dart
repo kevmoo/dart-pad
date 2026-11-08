@@ -26,6 +26,7 @@ class FileTreeFolderItem extends StatefulComponent {
     required this.depth,
     required this.state,
     required this.actions,
+    this.onFileOpened,
     required this.selectedPath,
     required this.onSelect,
     this.creatingInFolder,
@@ -49,6 +50,9 @@ class FileTreeFolderItem extends StatefulComponent {
 
   /// The actions available for file tree manipulation.
   final FileTreeActions actions;
+
+  /// Called after opening a file in this subtree.
+  final VoidCallback? onFileOpened;
 
   /// The path of the currently selected node, if any.
   final String? selectedPath;
@@ -133,23 +137,8 @@ class _FileTreeFolderItemState extends State<FileTreeFolderItem> {
     unawaited(
       Future<void>.delayed(Duration.zero, () {
         final node = _folderKey.currentNode;
-        final root = node?.closest('.file-tree-list');
         if (node != null) {
-          node.scrollIntoView(
-            web.ScrollIntoViewOptions(
-              behavior: 'instant',
-              block: 'start',
-            ),
-          );
-          if (root != null) {
-            // Scroll up to account for sticky parent folder items.
-            root.scrollBy(
-              web.ScrollToOptions(
-                top: -25 * component.depth,
-                behavior: 'instant',
-              ),
-            );
-          }
+          scrollFileTreeRowIntoView(node, depth: component.depth);
         }
       }),
     );
@@ -302,6 +291,7 @@ class _FileTreeFolderItemState extends State<FileTreeFolderItem> {
                 depth: component.depth + 1,
                 state: component.state,
                 actions: component.actions,
+                onFileOpened: component.onFileOpened,
                 selectedPath: component.selectedPath,
                 onSelect: component.onSelect,
                 creatingInFolder: component.creatingInFolder,
@@ -339,6 +329,7 @@ class _FileTreeFolderItemState extends State<FileTreeFolderItem> {
                 depth: component.depth + 1,
                 state: component.state,
                 actions: component.actions,
+                onFileOpened: component.onFileOpened,
                 selectedPath: component.selectedPath,
                 onSelect: component.onSelect,
                 confirmDelete: component.confirmDelete,

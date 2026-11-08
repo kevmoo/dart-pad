@@ -30,7 +30,9 @@ import 'features/preview/models/device_mode.dart';
 import 'features/preview/models/preview_state.dart';
 import 'features/preview/models/run_mode.dart';
 import 'features/preview/view/preview_container.dart';
+import 'features/shared/analyzer_configuration.dart';
 import 'features/shared/app_event_bus.dart';
+import 'features/shared/browser_device.dart';
 import 'features/shared/components/app_bar.dart';
 import 'features/shared/components/command_palette.dart';
 import 'features/shared/components/context_menu.dart';
@@ -39,7 +41,6 @@ import 'features/shared/components/footer.dart';
 import 'features/shared/components/panel_visibility.dart';
 import 'features/shared/components/shortcut_definitions.dart';
 import 'features/shared/components/shortcuts_dialog.dart';
-import 'features/shared/components/split_panel.dart';
 import 'features/shared/events/error_toast_event.dart';
 import 'features/shared/events/log_event.dart';
 import 'features/shared/events/open_console_event.dart';
@@ -48,17 +49,20 @@ import 'features/shared/panel_presentation_state.dart';
 import 'features/shared/sdk_info.dart';
 import 'features/shared/task_status.dart';
 import 'features/shared/workspace_mode.dart';
+import 'features/startup/analyzer_policy.dart';
 import 'features/startup/initial_project_state.dart';
 import 'features/startup/project_loader.dart';
 import 'features/startup/project_request.dart';
 import 'features/startup/project_source.dart';
 import 'features/startup/query_parameters.dart';
+import 'features/startup/strip_unavailable_dependencies.dart';
 import 'features/webmcp/components/connect_agent_dialog.dart';
 import 'features/webmcp/dartpad_mcp_controller.dart';
 import 'features/webmcp/webmcp_models.dart';
 import 'features/workspace/data/workspace_repository.dart';
 import 'features/workspace/embed_message_controller.dart';
 import 'features/workspace/embed_runtime_controller.dart';
+import 'features/workspace/workspace_layout.dart';
 import 'features/workspace/workspace_lifecycle.dart';
 import 'features/workspace/workspace_session.dart';
 import 'sdks.g.dart';
@@ -100,6 +104,7 @@ final class App extends StatefulComponent {
 /// Composition root – wires all services and drives the startup lifecycle.
 final class _AppState extends State<App> implements DartPadMcpHost {
   late final bool _isEmbedMode;
+  late final bool _enableAnalyzer;
   late final PanelLayoutController _panels;
   EmbedRuntimeController? _embedRuntime;
   late final EmbedMessageController _embedMessages;
@@ -177,8 +182,13 @@ final class _AppState extends State<App> implements DartPadMcpHost {
   @override
   void initState() {
     super.initState();
+    _enableAnalyzer = analyzerEnabledByDefault();
     _isEmbedMode = QueryParameters.isEmbeddedUri(component.initialUri ?? Uri.base);
-    _panels = PanelLayoutController(mode: _isEmbedMode ? WorkspaceMode.embed : WorkspaceMode.standalone);
+    _isLargeScreen = web.window.innerWidth >= minLargeScreenWidth;
+    _panels = PanelLayoutController(
+      mode: _isEmbedMode ? WorkspaceMode.embed : WorkspaceMode.standalone,
+      isSmallScreen: !_isLargeScreen,
+    );
     _embedMessages = EmbedMessageController(onSourceCode: _injectSourceCode);
     if (_isEmbedMode) {
       _embedRuntime = EmbedRuntimeController(
@@ -195,7 +205,6 @@ final class _AppState extends State<App> implements DartPadMcpHost {
       enabled: !_isEmbedMode,
       store: component.projectStore,
     )..addListener(_onPersistenceChanged);
-    _isLargeScreen = web.window.innerWidth >= minLargeScreenWidth;
     _resizeSubscription = web.EventStreamProviders.resizeEvent.forTarget(web.window).listen((_) {
       _updateScreenSize();
     });
@@ -299,6 +308,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
       for (final warning in project.contents.importWarnings) {
         session.events.dispatch(LogEvent(warning, level: Level.WARNING));
       }
+      session.diagnostics.setImportDiagnostics(dependencyDiagnostics(project.contents));
       if (snapshot != null) {
         _persistence.reportRestoredSdk(saved: snapshot.sdk, actual: project.initialState.sdk);
       }
@@ -395,6 +405,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
     if (_isLargeScreen != isLarge) {
       setState(() {
         _isLargeScreen = isLarge;
+        _panels.updateScreenSize(isSmallScreen: !isLarge);
       });
     }
   }
@@ -406,6 +417,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
         state is PreviewHotReloading) {
       _panels.expandPreview();
       if (!_isLargeScreen && _selectedSmallScreenTab != .output) {
+        _panels.closeSmallScreenFileTree();
         setState(() {
           _selectedSmallScreenTab = .output;
         });
@@ -433,6 +445,9 @@ final class _AppState extends State<App> implements DartPadMcpHost {
       final tab = session.tabs.getTab(entrypoint) as WorkspaceCodeMirrorTab;
       tab.editor.text = sourceCode;
       await session.tabs.saveAllTabs();
+      if (_isCurrent(session)) {
+        session.preview.useInjectedSource(sourceCode);
+      }
     } catch (error, stackTrace) {
       if (!_isCurrent(session)) {
         return;
@@ -514,7 +529,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
       _embedMessages.ready();
       if (_isEmbedMode) {
         setState(() => _isInitializingWorkspace = false);
-        if (session.initialProject.request.autoRun) {
+        if (session.initialProject.request.autoRun && !isMobileBrowser()) {
           unawaited(session.preview.runCurrent(autoStart: true));
         }
         return;
@@ -594,11 +609,13 @@ final class _AppState extends State<App> implements DartPadMcpHost {
         return false;
       }
     }
-    await _initializeAnalyzer(session, workspace, project.root, generation);
+    if (_enableAnalyzer) {
+      await _initializeAnalyzer(session, workspace, project.root, generation);
+    }
     return preparationSucceeded;
   }
 
-  /// Starts the language server with an editor root derived from [packageRoot].
+  /// Starts the analyzer with an editor root derived from [packageRoot].
   ///
   /// [packageRoot] is relative to the complete virtual [workspace]. It is
   /// `null` when no Dart package was detected and empty when the package is
@@ -819,7 +836,10 @@ final class _AppState extends State<App> implements DartPadMcpHost {
   }
 
   @override
-  Component build(BuildContext context) => _buildWorkspace(context);
+  Component build(BuildContext context) => AnalyzerConfiguration(
+    enabled: _enableAnalyzer,
+    child: _buildWorkspace(context),
+  );
 
   TaskStatusController get _activeTaskStatus {
     final session = _activeSession;
@@ -891,33 +911,25 @@ final class _AppState extends State<App> implements DartPadMcpHost {
           key: ValueKey(session),
           listenable: session.tabs,
           builder: (context) {
-            final preview = _buildPreviewPanel(session);
             final editor = EditorShell(
               openTabs: session.tabs.openTabs,
               activeFile: session.tabs.activeFile,
-              fileTree: _buildFileTree(session),
               editorOverlay: _buildEditorOverlay(session),
               onSwitchFile: session.tabs.switchFile,
               onCloseFile: session.tabs.closeFile,
               bottomPanel: _buildBottomPanel(session),
               contextMenu: session.contextMenu,
               panelController: _panels,
-              smallScreenPreviewPanel: !_isLargeScreen && _selectedSmallScreenTab == .output ? preview : null,
             );
             return div(classes: 'app-workspace-container', [
               div(classes: 'app-workspace', [
-                if (_isLargeScreen)
-                  SplitPanel(
-                    state: _panels.previewListenable,
-                    onStateChanged: _panels.updatePreview,
-                    canCollapseRight: true,
-                    minValue: _isEmbedMode ? 0.05 : 0.3,
-                    maxValue: _isEmbedMode ? 0.95 : 0.85,
-                    left: editor,
-                    right: preview,
-                  )
-                else
-                  editor,
+                WorkspaceLayout(
+                  fileTree: _buildFileTree(session),
+                  editor: editor,
+                  preview: _buildPreviewPanel(session),
+                  panels: _panels,
+                  showOutput: _selectedSmallScreenTab == .output,
+                ),
               ]),
               _buildStatusBar(statusMessage: session.tabs.errorMessage ?? session.tabs.warningMessage),
             ]);
@@ -981,14 +993,17 @@ final class _AppState extends State<App> implements DartPadMcpHost {
     ),
     // Navigation must remain reachable even when the app bar is hidden.
     if (showNavigation && !_isLargeScreen)
-      SmallScreenTabBar(
-        selectedTab: _selectedSmallScreenTab,
-        onTabSelected: (tab) {
-          if (tab == .output) {
-            _panels.expandPreview();
-          }
-          setState(() => _selectedSmallScreenTab = tab);
-        },
+      ValueListenableBuilder(
+        listenable: _panels.fileTreeListenable,
+        builder: (_, fileTree) => SmallScreenTabBar(
+          selectedTab: _selectedSmallScreenTab,
+          isFileTreeExpanded: fileTree.isSplit,
+          onToggleFileTree: _panels.toggleFileTree,
+          onTabSelected: (tab) {
+            _panels.closeSmallScreenFileTree();
+            setState(() => _selectedSmallScreenTab = tab);
+          },
+        ),
       ),
   ]);
 
@@ -1015,32 +1030,25 @@ final class _AppState extends State<App> implements DartPadMcpHost {
 
   /// Keep the editor layout visible while the project source or saved state loads.
   Component _buildPendingWorkspace() {
-    final editor = EditorShell(
-      openTabs: const [],
-      activeFile: '',
+    return WorkspaceLayout(
       fileTree: const aside(classes: 'file-tree', [
         div(classes: 'file-tree-header', [
           span(classes: 'file-tree-title', [.text('Explorer')]),
         ]),
         div(classes: 'file-tree-list', []),
       ]),
-      editorOverlay: const .fragment([]),
-      onSwitchFile: (_) {},
-      onCloseFile: (_, {discardChanges = false}) => false,
-      bottomPanel: const div(classes: 'bottom-panel', []),
-      panelController: _panels,
-    );
-    if (!_isLargeScreen) {
-      return editor;
-    }
-    return SplitPanel(
-      state: _panels.previewListenable,
-      onStateChanged: _panels.updatePreview,
-      canCollapseRight: true,
-      minValue: _isEmbedMode ? 0.05 : 0.3,
-      maxValue: _isEmbedMode ? 0.95 : 0.85,
-      left: editor,
-      right: const div(classes: 'preview-container', []),
+      editor: EditorShell(
+        openTabs: const [],
+        activeFile: '',
+        editorOverlay: const .fragment([]),
+        onSwitchFile: (_) {},
+        onCloseFile: (_, {discardChanges = false}) => false,
+        bottomPanel: const div(classes: 'bottom-panel', []),
+        panelController: _panels,
+      ),
+      preview: const div(classes: 'preview-container', []),
+      panels: _panels,
+      showOutput: _selectedSmallScreenTab == .output,
     );
   }
 
@@ -1100,6 +1108,12 @@ final class _AppState extends State<App> implements DartPadMcpHost {
       builder: (context) => FileTreeView(
         state: session.fileTree.state,
         actions: session.fileTree.actions,
+        onFileOpened: () {
+          _panels.closeSmallScreenFileTree();
+          if (!_isLargeScreen && _selectedSmallScreenTab != .code) {
+            setState(() => _selectedSmallScreenTab = .code);
+          }
+        },
         contextMenu: session.contextMenu,
       ),
     );
@@ -1114,7 +1128,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
         activeFile: session.tabs.activeFile,
         workspacePreparationFailure: _workspacePreparationFailure,
         onOpenConsole: () => _openConsole(session),
-        initialDeviceMode: _isEmbedMode ? DeviceMode.current : DeviceMode.mobile,
+        initialDeviceMode: _isEmbedMode || !_isLargeScreen ? DeviceMode.current : DeviceMode.mobile,
       ),
     );
   }

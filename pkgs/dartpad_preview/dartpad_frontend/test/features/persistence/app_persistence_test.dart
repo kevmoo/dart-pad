@@ -3,6 +3,8 @@
 // BSD-style license that can be found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:dartpad/dartpad.dart';
 import 'package:dartpad_frontend/app.dart';
@@ -29,7 +31,7 @@ void main() {
   late List<WorkspaceRepository> repositories;
   late int sourceLoads;
   setUp(() {
-    store = MemoryProjectStore(savedProject(query: ''));
+    store = MemoryProjectStore(savedProject(query: '', sessionId: 1));
     repositories = [];
     sourceLoads = 0;
   });
@@ -56,9 +58,15 @@ void main() {
     },
   );
 
-  testClient('without query restores the latest entry', (tester) async {
-    final latest = await store.create(savedProject(query: '', text: 'most recent'));
-    tester.pumpComponent(app(''));
+  /// Titles of the rendered Problems rows, each `severity: message (location)`.
+  List<String> problemTitles() {
+    final rows = web.document.querySelectorAll('.problem-row');
+    return [for (var i = 0; i < rows.length; i++) (rows.item(i)! as web.HTMLElement).title];
+  }
+
+  testClient('session id restores its saved entry without loading source', (tester) async {
+    final latest = await store.create(savedProject(query: '', text: 'most recent', sessionId: 1));
+    tester.pumpComponent(app('?s=1'));
     await pumpEventQueue();
     expect(sourceLoads, 0);
     expect(await repositories.single.workspaceResourceApi.readFileAsText('lib/main.dart'), 'most recent');
@@ -67,14 +75,58 @@ void main() {
     expect(store.state, same(store.entries[latest.id]!.state));
   });
 
-  testClient('theme-only query restores the latest entry', (tester) async {
-    final latest = await store.create(savedProject(query: '', text: 'most recent'));
-    tester.pumpComponent(app('?theme=dark'));
+  testClient('theme-only query with session id restores its saved entry', (tester) async {
+    final latest = await store.create(savedProject(query: '', text: 'most recent', sessionId: 1));
+    tester.pumpComponent(app('?theme=dark&s=1'));
     await pumpEventQueue();
     expect(sourceLoads, 0);
     expect(await repositories.single.workspaceResourceApi.readFileAsText('lib/main.dart'), 'most recent');
     expect(store.entries, hasLength(2));
     expect(store.state, same(store.entries[latest.id]!.state));
+  });
+
+  testClient('restored session shows unavailable dependency problems without loading source', (tester) async {
+    await store.create(
+      savedProject(
+        query: '',
+        files: {
+          'lib/main.dart': Uint8List.fromList(utf8.encode('void main() {}')),
+          'pubspec.yaml': Uint8List.fromList(
+            utf8.encode('name: demo\ndependencies:\n  local: {git: https://example.com/local.git}\n'),
+          ),
+        },
+        sessionId: 1,
+      ),
+    );
+    tester.pumpComponent(app('?s=1'));
+    await pumpEventQueue();
+    expect(sourceLoads, 0);
+    expect(
+      problemTitles(),
+      contains(startsWith('Error: Dependency "local" uses Git, which is not supported by DartPad')),
+    );
+  });
+
+  testClient('restored session reports unavailable dev dependencies added after import', (tester) async {
+    await store.create(
+      savedProject(
+        query: '',
+        files: {
+          'lib/main.dart': Uint8List.fromList(utf8.encode('void main() {}')),
+          'pubspec.yaml': Uint8List.fromList(
+            utf8.encode('name: demo\ndev_dependencies:\n  local: {git: https://example.com/local.git}\n'),
+          ),
+        },
+        sessionId: 1,
+      ),
+    );
+    tester.pumpComponent(app('?s=1'));
+    await pumpEventQueue();
+    expect(sourceLoads, 0);
+    expect(
+      problemTitles(),
+      contains(startsWith('Error: Dependency "local" uses Git, which is not supported by DartPad')),
+    );
   });
 
   testClient('matching URL saves fresh work immediately without blocking', (tester) async {
@@ -201,11 +253,15 @@ void main() {
     (item as web.HTMLElement).click();
   }
 
-  testClient('bare URL reuses one scratch entry across reloads', (
+  testClient('bare URL mints a session id and reloads it by that id', (
     tester,
   ) async {
+    final originalUrl = web.window.location.href;
+    addTearDown(() => web.window.history.replaceState(null, '', originalUrl));
+    store = MemoryProjectStore();
     tester.pumpComponent(app(''));
     await pumpEventQueue();
+    expect(Uri.parse(web.window.location.href).queryParameters['s'], '1');
     await repositories.single.workspaceResourceApi.writeFileFromText(
       'lib/main.dart',
       'bare edit',
@@ -214,7 +270,7 @@ void main() {
     tester.binding.detachRootComponent();
     await pumpEventQueue();
 
-    tester.pumpComponent(app(''));
+    tester.pumpComponent(app('?s=1'));
     await pumpEventQueue();
     expect(store.entries, hasLength(1));
     expect(
@@ -305,9 +361,9 @@ void main() {
   });
 
   testClient('another tab saving leaves editing enabled and the last autosave wins', (tester) async {
-    tester.pumpComponent(app(''));
+    tester.pumpComponent(app('?s=1'));
     await pumpEventQueue();
-    await store.write('saved', savedProject(query: '', text: 'other tab'));
+    await store.write('saved', savedProject(query: '', text: 'other tab', sessionId: 1));
     web.document.dispatchEvent(web.Event('visibilitychange'));
     await pumpEventQueue();
     expect(web.document.querySelector('dialog'), isNull);
@@ -325,9 +381,13 @@ void main() {
 
   testClient('failed restore offers Start fresh and retains the failed entry', (tester) async {
     final files = savedProject(query: '').files;
-    final previous = savedProject(query: '', files: {...files, 'lib/./main.dart': files['lib/main.dart']!});
+    final previous = savedProject(
+      query: '',
+      sessionId: 1,
+      files: {...files, 'lib/./main.dart': files['lib/main.dart']!},
+    );
     store = MemoryProjectStore(previous);
-    tester.pumpComponent(app(''));
+    tester.pumpComponent(app('?s=1'));
     await pumpEventQueue();
     final failure = web.document.querySelector('.restore-project-failure')!;
     expect(failure.textContent, contains('Restoring your project failed.'));

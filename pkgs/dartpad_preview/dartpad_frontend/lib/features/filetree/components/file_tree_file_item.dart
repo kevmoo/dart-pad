@@ -24,6 +24,7 @@ class FileTreeFileItem extends StatefulComponent {
     required this.depth,
     required this.state,
     required this.actions,
+    this.onFileOpened,
     required this.selectedPath,
     required this.onSelect,
     this.confirmDelete,
@@ -42,6 +43,9 @@ class FileTreeFileItem extends StatefulComponent {
 
   /// The actions available for file tree manipulation.
   final FileTreeActions actions;
+
+  /// Called after this file successfully opens.
+  final VoidCallback? onFileOpened;
 
   /// The path of the currently selected node, if any.
   final String? selectedPath;
@@ -88,23 +92,8 @@ class _FileTreeFileItemState extends State<FileTreeFileItem> {
     unawaited(
       Future<void>.delayed(Duration.zero, () {
         final node = _rowKey.currentNode;
-        final root = node?.closest('.file-tree-list');
         if (node != null) {
-          node.scrollIntoView(
-            web.ScrollIntoViewOptions(
-              behavior: 'instant',
-              block: 'start',
-            ),
-          );
-          if (root != null) {
-            // Scroll up to account for sticky parent folder items.
-            root.scrollBy(
-              web.ScrollToOptions(
-                top: -25 * component.depth,
-                behavior: 'instant',
-              ),
-            );
-          }
+          scrollFileTreeRowIntoView(node, depth: component.depth);
         }
       }),
     );
@@ -194,6 +183,7 @@ class _FileTreeFileItemState extends State<FileTreeFileItem> {
   Future<void> _openWorkspaceFile(String path) async {
     try {
       await component.actions.openWorkspaceFile(path);
+      component.onFileOpened?.call();
     } catch (_) {
       // The tab model has already reported the load failure.
     }
