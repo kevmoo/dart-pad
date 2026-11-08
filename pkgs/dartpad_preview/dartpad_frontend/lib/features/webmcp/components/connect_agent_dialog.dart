@@ -4,6 +4,7 @@
 
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
 
 import 'package:jaspr/dom.dart';
 import 'package:jaspr/jaspr.dart';
@@ -33,13 +34,15 @@ enum AgentStarterTask {
   ),
   materialMakeover(
     'Material 3 Makeover',
-    'Restyle `lib/main.dart` into a crisp, interactive Material 3 mini-dashboard, hot-reload '
-        'the preview, verify zero analyzer or runtime errors, and inspect the widget tree.',
+    'Restyle `lib/main.dart` into a crisp, interactive Material 3 mini-dashboard, reload or '
+        'restart the preview (`dartpad_run_or_reload`), verify zero analyzer or runtime errors, '
+        'and inspect the widget tree.',
   ),
   miniGame(
     'Interactive Mini-App',
     'Build a playful, self-contained interactive Flutter mini-app with smooth animations in '
-        '`lib/main.dart`, hot-reload the preview, and verify zero diagnostics or runtime errors.',
+        '`lib/main.dart`, reload or restart the preview (`dartpad_run_or_reload`), and verify '
+        'zero diagnostics or runtime errors.',
   );
 
   const AgentStarterTask(this.label, this.instruction);
@@ -51,12 +54,18 @@ enum AgentStarterTask {
 /// Browser-specific Local Network Access / MixedContent notice for loopback WebSockets.
 final class AgentBrowserNotice {
   const AgentBrowserNotice({
-    required this.message,
+    required this.prefixText,
     required this.isBlockingError,
+    this.inlineCode,
+    this.suffixText = '',
   });
 
-  final String message;
+  final String prefixText;
+  final String? inlineCode;
+  final String suffixText;
   final bool isBlockingError;
+
+  String get message => inlineCode == null ? prefixText : '$prefixText$inlineCode$suffixText';
 }
 
 /// Detects Safari `MixedContentChecker` blocks or Chrome Local Network Access prompts
@@ -65,12 +74,14 @@ AgentBrowserNotice? detectLocalBridgeBrowserWarning({
   required String protocol,
   required String userAgent,
   int port = 8787,
+  String? localNetworkPermissionState,
+  bool isBridgeConnected = false,
 }) {
   if (protocol != 'https:') {
     return null;
   }
-  final ua = userAgent.toLowerCase();
-  final isSafari =
+  final String ua = userAgent.toLowerCase();
+  final bool isSafari =
       ua.contains('safari') &&
       !ua.contains('chrome') &&
       !ua.contains('chromium') &&
@@ -80,17 +91,33 @@ AgentBrowserNotice? detectLocalBridgeBrowserWarning({
   if (isSafari) {
     return const AgentBrowserNotice(
       isBlockingError: true,
-      message:
+      prefixText:
           'Safari blocks https:// pages from opening ws://127.0.0.1 loopback WebSockets. '
           'Open this URL in Chrome to connect a local CLI coding agent.',
     );
   }
+  if (localNetworkPermissionState == 'denied') {
+    return AgentBrowserNotice(
+      isBlockingError: true,
+      prefixText:
+          "Local Network Access is blocked for this site. Click the tune icon in Chrome's "
+          'address bar, set Local network access to Allow, and reconnect to 127.0.0.1:$port.',
+    );
+  }
+  if (localNetworkPermissionState == 'granted' && isBridgeConnected) {
+    return null;
+  }
+  final String lead = localNetworkPermissionState == 'granted'
+      ? 'Local Network Access is allowed for 127.0.0.1:$port. If your agent runs on a remote '
+            'SSH/Cloudtop host, forward port $port ('
+      : 'Click Allow if Chrome prompts for Local Network Access so this tab can reach '
+            '127.0.0.1:$port. If your agent runs on a remote SSH/Cloudtop host, forward '
+            'port $port (';
   return AgentBrowserNotice(
     isBlockingError: false,
-    message:
-        'Click Allow if Chrome prompts for Local Network Access so this tab can reach '
-        '127.0.0.1:$port. If your agent runs on a remote SSH/Cloudtop host, forward '
-        'port $port (ssh -L $port:127.0.0.1:$port).',
+    prefixText: lead,
+    inlineCode: 'ssh -L $port:127.0.0.1:$port',
+    suffixText: ').',
   );
 }
 
@@ -113,9 +140,11 @@ String buildAgentBootstrapPrompt({
   required AgentStarterTask starterTask,
   String? pageUrl,
 }) {
-  final sessionClause = (sessionId != null && sessionId.isNotEmpty) ? ' (session s=$sessionId)' : '';
-  final sessionFlag = (sessionId != null && sessionId.isNotEmpty) ? ' --session $sessionId' : '';
-  final defaultQuery = (sessionId != null && sessionId.isNotEmpty) ? 's=$sessionId&mcp_port=$port' : 'mcp_port=$port';
+  final hasSession = sessionId != null && sessionId.isNotEmpty;
+  final isNumericSession = hasSession && int.tryParse(sessionId) != null;
+  final sessionClause = !hasSession ? '' : (isNumericSession ? ' (session s=$sessionId)' : ' (session $sessionId)');
+  final sessionFlag = hasSession ? ' --session $sessionId' : '';
+  final defaultQuery = isNumericSession ? 's=$sessionId&mcp_port=$port' : 'mcp_port=$port';
   final targetTabUrl = (pageUrl != null && pageUrl.isNotEmpty)
       ? pageUrl
       : 'https://dartpad-webmcp.web.app/?$defaultQuery';
@@ -126,9 +155,9 @@ Connect to my DartPad Preview browser tab at $targetTabUrl$sessionClause, which 
 1. Start the zero-dependency local MCP bridge in the background on port $port (skip if `http://127.0.0.1:$port/healthz` already responds):
    - Preferred (Dart 3.12+): `dart run '$dartPadMcpGitSpec' --port $port`
    - Fallback (if standalone `dart` is unavailable): `curl -fsSL $dartPadMcpPythonUrl -o /tmp/dartpad_mcp_server.py && python3 /tmp/dartpad_mcp_server.py --port $port`
-2. Wait ~1-2s for the open tab's auto-reconnect loop, then verify `connectedTabs` is non-empty:
-   `dart run '$dartPadMcpGitSpec' status --port $port --require-tab` (or `python3 /tmp/dartpad_mcp_server.py status --port $port --require-tab`)
-   - If `connectedTabs` is empty (exit code 2): open `$targetTabUrl` in Chrome if no tab is open yet, or if the tab is open on `https://`, ask me to click **Allow** on Chrome's Local Network Access prompt in the address bar (Safari blocks `https://` -> `ws://127.0.0.1`), then re-run `status --require-tab`.
+2. Wait ~1-2s for the open tab's auto-reconnect loop, then verify the target tab is connected:
+   `dart run '$dartPadMcpGitSpec' status --port $port --require-tab$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py status --port $port --require-tab$sessionFlag`)
+   - If `status --require-tab` exits with code 2: open `$targetTabUrl` in Chrome if no tab is open yet, or if the tab is open on `https://`, ask me to click **Allow** on Chrome's Local Network Access prompt in the address bar (Safari blocks `https://` -> `ws://127.0.0.1`), then re-run `status --require-tab$sessionFlag`.
 3. Register `http://127.0.0.1:$port/mcp` (Streamable HTTP) or `--stdio` as an MCP server if supported, AND call DartPad tools immediately right now without restarting:
    - List tools and exact JSON schemas first: `dart run '$dartPadMcpGitSpec' tools --port $port$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py tools --port $port$sessionFlag`)
    - Call a tool with JSON args matching `inputSchema` (e.g. `dartpad_write_files` takes `{"files":[{"path":"lib/main.dart","content":"..."}]}`):
@@ -165,15 +194,19 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
   AgentStarterTask _selectedTask = AgentStarterTask.inspect;
   bool _showManualSetup = false;
   String? _copiedKey;
+  String? _localNetworkPermissionState;
   late String _portInput;
   Timer? _copiedResetTimer;
   StreamSubscription<web.KeyboardEvent>? _keySubscription;
+  JSObject? _permissionStatusObject;
+  JSFunction? _permissionChangeListener;
 
   @override
   void initState() {
     super.initState();
     _portInput = '${component.statusListenable.value.port}';
     _keySubscription = web.EventStreamProviders.keyDownEvent.forTarget(web.document).listen(_handleKeyDown);
+    unawaited(_queryLocalNetworkPermission());
     Timer.run(() {
       if (!mounted) {
         return;
@@ -193,7 +226,68 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
     _copiedResetTimer = null;
     _keySubscription?.cancel();
     _keySubscription = null;
+    if (_permissionStatusObject case final JSObject statusObj) {
+      if (_permissionChangeListener case final JSFunction listener) {
+        try {
+          statusObj.callMethodVarArgs<JSAny?>(
+            'removeEventListener'.toJS,
+            <JSAny?>['change'.toJS, listener],
+          );
+        } catch (_) {
+          // Ignore listener teardown errors on exotic browsers.
+        }
+      }
+    }
+    _permissionStatusObject = null;
+    _permissionChangeListener = null;
     super.dispose();
+  }
+
+  Future<void> _queryLocalNetworkPermission() async {
+    if (web.window.location.protocol != 'https:') {
+      return;
+    }
+    try {
+      final JSObject nav = web.window.navigator as JSObject;
+      final JSAny? rawPermissions = nav.getProperty<JSAny?>('permissions'.toJS);
+      if (rawPermissions == null || rawPermissions.isUndefinedOrNull || !rawPermissions.typeofEquals('object')) {
+        return;
+      }
+      final JSObject permissions = rawPermissions as JSObject;
+      if (!permissions.has('query')) {
+        return;
+      }
+      final JSObject descriptor = JSObject()..setProperty('name'.toJS, 'local-network-access'.toJS);
+      final JSPromise<JSObject> queryPromise = permissions.callMethodVarArgs<JSPromise<JSObject>>(
+        'query'.toJS,
+        <JSAny?>[descriptor],
+      );
+      final JSObject statusObj = await queryPromise.toDart;
+      if (!mounted) {
+        return;
+      }
+      void syncState() {
+        final JSAny? rawState = statusObj.getProperty<JSAny?>('state'.toJS);
+        if (rawState != null && rawState.typeofEquals('string') && mounted) {
+          final String nextState = (rawState as JSString).toDart;
+          if (nextState != _localNetworkPermissionState) {
+            setState(() => _localNetworkPermissionState = nextState);
+          }
+        }
+      }
+
+      syncState();
+      final JSFunction listener = (([JSAny? _]) => syncState()).toJS;
+      _permissionStatusObject = statusObj;
+      _permissionChangeListener = listener;
+      statusObj.callMethodVarArgs<JSAny?>(
+        'addEventListener'.toJS,
+        <JSAny?>['change'.toJS, listener],
+      );
+    } catch (_) {
+      // Browsers without Chrome's `'local-network-access'` permission descriptor
+      // reject `permissions.query`; fall back to the static guidance notice.
+    }
   }
 
   void _handleKeyDown(web.KeyboardEvent event) {
@@ -263,19 +357,25 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
     return ValueListenableBuilder<McpBridgeStatus>(
       listenable: component.statusListenable,
       builder: (context, status) {
-        final browserNotice = detectLocalBridgeBrowserWarning(
+        final String? effectiveSessionId = (component.sessionId != null && component.sessionId!.isNotEmpty)
+            ? component.sessionId
+            : status.assignedSessionId;
+        final AgentBrowserNotice? browserNotice = detectLocalBridgeBrowserWarning(
           protocol: web.window.location.protocol,
           userAgent: web.window.navigator.userAgent,
           port: status.port,
+          localNetworkPermissionState: _localNetworkPermissionState,
+          isBridgeConnected: status.phase == McpConnectionPhase.connected,
         );
-        final prompt = buildAgentBootstrapPrompt(
+        final String prompt = buildAgentBootstrapPrompt(
           port: status.port,
-          sessionId: component.sessionId,
+          sessionId: effectiveSessionId,
           starterTask: _selectedTask,
           pageUrl: _buildConnectablePageUrl(web.window.location.href, status.port),
         );
-        final parsedPort = int.tryParse(_portInput.trim());
-        final canApplyPort = parsedPort != null && parsedPort > 0 && parsedPort <= 65535 && parsedPort != status.port;
+        final int? parsedPort = int.tryParse(_portInput.trim());
+        final bool canApplyPort =
+            parsedPort != null && parsedPort > 0 && parsedPort <= 65535 && parsedPort != status.port;
 
         return div(
           classes: 'connect-agent-backdrop',
@@ -295,7 +395,11 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
             div(classes: 'connect-agent-dialog', [
               _buildHeader(),
               div(classes: 'connect-agent-body', [
-                _buildStatusRow(status, canApplyPort: canApplyPort),
+                _buildStatusRow(
+                  status,
+                  effectiveSessionId: effectiveSessionId,
+                  canApplyPort: canApplyPort,
+                ),
                 if (browserNotice != null) _buildBrowserNotice(browserNotice),
                 _buildTaskSelector(),
                 _buildPrimaryCopySection(prompt),
@@ -320,19 +424,26 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
     ),
   ]);
 
-  Component _buildStatusRow(McpBridgeStatus status, {required bool canApplyPort}) {
-    final (dotClass, label) = switch (status.phase) {
+  Component _buildStatusRow(
+    McpBridgeStatus status, {
+    required String? effectiveSessionId,
+    required bool canApplyPort,
+  }) {
+    final String sessionBadge = (effectiveSessionId != null && effectiveSessionId.isNotEmpty)
+        ? ' · session $effectiveSessionId'
+        : '';
+    final (String dotClass, String label) = switch (status.phase) {
       McpConnectionPhase.connected when status.isBusy => (
         'status-dot-connected',
-        'Connected on :${status.port} · running ${status.lastToolName ?? 'tool'}…',
+        'Connected on :${status.port}$sessionBadge · running ${status.lastToolName ?? 'tool'}…',
       ),
       McpConnectionPhase.connected => (
         'status-dot-connected',
-        'Connected to local bridge on :${status.port}',
+        'Connected to local bridge on :${status.port}$sessionBadge',
       ),
       McpConnectionPhase.connecting => (
         'status-dot-waiting',
-        'Waiting for local bridge on ws://127.0.0.1:${status.port}/mcp-ws…',
+        'Waiting for local bridge on ws://127.0.0.1:${status.port}/mcp-ws$sessionBadge…',
       ),
       McpConnectionPhase.disabled => (
         'status-dot-disabled',
@@ -401,7 +512,13 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
         : 'connect-agent-notice connect-agent-notice-info',
     [
       Icon(notice.isBlockingError ? 'warning' : 'info', size: 16),
-      span([.text(notice.message)]),
+      span(classes: 'connect-agent-notice-text', [
+        .text(notice.prefixText),
+        if (notice.inlineCode case final String cmd) ...[
+          code(classes: 'connect-agent-inline-code', [.text(cmd)]),
+          if (notice.suffixText.isNotEmpty) .text(notice.suffixText),
+        ],
+      ]),
     ],
   );
 
@@ -647,6 +764,20 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
       fontSize: 12.px,
       lineHeight: 1.4.em,
     ),
+    css('.connect-agent-notice .material-symbols-outlined').styles(
+      flex: const .shrink(0),
+    ),
+    css('.connect-agent-notice-text').styles(
+      minWidth: 0.px,
+    ),
+    css('.connect-agent-inline-code').styles(
+      padding: .symmetric(vertical: 1.px, horizontal: 4.px),
+      radius: .circular(3.px),
+      fontFamily: monospaceFontFamily,
+      fontSize: 11.px,
+      whiteSpace: .noWrap,
+      backgroundColor: colorSurface,
+    ),
     css('.connect-agent-notice-error').styles(
       border: .all(color: colorError, width: 1.px),
       color: colorOnContainer,
@@ -760,17 +891,22 @@ final class _ConnectAgentDialogState extends State<ConnectAgentDialog> {
       alignItems: .center,
       gap: Gap.all(6.px),
     ),
+    css('.connect-agent-cmd-row .connect-agent-small-btn').styles(
+      flex: const .shrink(0),
+    ),
     css('.connect-agent-cmd-code').styles(
+      minWidth: 0.px,
       padding: .symmetric(vertical: 5.px, horizontal: 8.px),
       border: .all(color: colorBorder, width: 1.px),
       radius: .circular(4.px),
-      overflow: const .only(x: .auto),
       flex: const .grow(1),
       color: colorOnContainer,
       fontFamily: monospaceFontFamily,
       fontSize: 11.px,
-      whiteSpace: .noWrap,
+      lineHeight: 1.4.em,
+      whiteSpace: .preWrap,
       backgroundColor: colorContainer,
+      raw: const {'word-break': 'break-word'},
     ),
     css('.connect-agent-download-row').styles(
       display: .flex,

@@ -20,7 +20,9 @@ import 'package:dartpad_frontend/features/shared/unthrottled_timer.dart';
 import 'package:dartpad_frontend/features/startup/project_loader.dart';
 import 'package:dartpad_frontend/features/webmcp/components/connect_agent_dialog.dart';
 import 'package:dartpad_frontend/features/webmcp/dartpad_mcp_controller.dart';
+import 'package:dartpad_frontend/features/webmcp/webmcp_js_interop.dart';
 import 'package:dartpad_frontend/features/webmcp/webmcp_models.dart';
+import 'package:dartpad_frontend/features/webmcp/widget_tree_compactor.dart';
 import 'package:dartpad_frontend/features/workspace/data/workspace_repository.dart';
 import 'package:dartpad_frontend/features/workspace/workspace_session.dart';
 import 'package:dartpad_frontend/sdks.g.dart';
@@ -280,8 +282,39 @@ void main() {
     );
     expect(chromeHttps, isNotNull);
     expect(chromeHttps!.isBlockingError, isFalse);
+    expect(chromeHttps.inlineCode, 'ssh -L 8788:127.0.0.1:8788');
     expect(chromeHttps.message, contains('Local Network Access'));
     expect(chromeHttps.message, contains('ssh -L 8788:127.0.0.1:8788'));
+
+    expect(
+      detectLocalBridgeBrowserWarning(
+        protocol: 'https:',
+        userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',
+        port: 8788,
+        localNetworkPermissionState: 'granted',
+        isBridgeConnected: true,
+      ),
+      isNull,
+    );
+
+    final chromeDenied = detectLocalBridgeBrowserWarning(
+      protocol: 'https:',
+      userAgent: 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/142.0.0.0 Safari/537.36',
+      port: 8788,
+      localNetworkPermissionState: 'denied',
+      isBridgeConnected: false,
+    );
+    expect(chromeDenied, isNotNull);
+    expect(chromeDenied!.isBlockingError, isTrue);
+    expect(chromeDenied.message, contains('tune icon'));
+
+    const status = McpBridgeStatus(
+      phase: McpConnectionPhase.connected,
+      port: 8787,
+      assignedSessionId: 'tab-2',
+    );
+    expect(status.assignedSessionId, 'tab-2');
+    expect(status.copyWith(clearAssignedSessionId: true).assignedSessionId, isNull);
 
     final prompt = buildAgentBootstrapPrompt(
       port: 8788,
@@ -289,16 +322,239 @@ void main() {
       starterTask: AgentStarterTask.materialMakeover,
       pageUrl: 'https://dartpad-webmcp.web.app/?s=7&mcp_port=8788',
     );
-    expect(prompt, contains('https://dartpad-webmcp.web.app/?s=7&mcp_port=8788'));
+    expect(prompt, contains('https://dartpad-webmcp.web.app/?s=7&mcp_port=8788 (session s=7)'));
     expect(prompt, contains('ws://127.0.0.1:8788/mcp-ws'));
     expect(prompt, contains('ssh -L 8788:127.0.0.1:8788'));
     expect(prompt, contains('Local Network Access'));
     expect(prompt, contains("dart run '$dartPadMcpGitSpec' --port 8788"));
-    expect(prompt, contains('python3 /tmp/dartpad_mcp_server.py status --port 8788 --require-tab'));
+    expect(prompt, contains("dart run '$dartPadMcpGitSpec' status --port 8788 --require-tab --session 7"));
+    expect(prompt, contains('python3 /tmp/dartpad_mcp_server.py status --port 8788 --require-tab --session 7'));
     expect(prompt, contains("dart run '$dartPadMcpGitSpec' tools --port 8788 --session 7"));
     expect(prompt, contains("dart run '$dartPadMcpGitSpec' call <tool_name> --stdin --port 8788 --session 7"));
     expect(prompt, isNot(contains(r'$CLI')));
     expect(prompt, contains('--session 7'));
     expect(prompt, contains(AgentStarterTask.materialMakeover.instruction));
+    expect(AgentStarterTask.materialMakeover.instruction, contains('reload or restart'));
+
+    final barePrompt = buildAgentBootstrapPrompt(
+      port: 8788,
+      sessionId: 'tab-k7m2',
+      starterTask: AgentStarterTask.inspect,
+    );
+    expect(barePrompt, contains('https://dartpad-webmcp.web.app/?mcp_port=8788 (session tab-k7m2)'));
+    expect(barePrompt, isNot(contains('s=tab-k7m2')));
+    expect(barePrompt, contains('status --port 8788 --require-tab --session tab-k7m2'));
+    expect(barePrompt, contains('tools --port 8788 --session tab-k7m2'));
+  });
+
+  test('mints and persists stable clientTabId in sessionStorage when host.sessionId is null', () async {
+    const customStorageKey = 'dartpad.webmcp.tabId.test';
+    web.window.sessionStorage.removeItem(customStorageKey);
+    addTearDown(() => web.window.sessionStorage.removeItem(customStorageKey));
+
+    final minted = readOrMintClientTabId(storageKey: customStorageKey);
+    expect(minted, matches(RegExp(r'^tab-[0-9a-z]{4}$')));
+    expect(readOrMintClientTabId(storageKey: customStorageKey), minted);
+
+    host.sessionId = null;
+    final bareStatus = await controller.callTool('dartpad_get_status');
+    expect(bareStatus['sessionId'], controller.clientTabId);
+    expect(bareStatus['clientTabId'], controller.clientTabId);
+    expect(controller.effectiveSessionId, controller.clientTabId);
+
+    final secondController = DartPadMcpController(
+      host: host,
+      installBrowserRegistry: false,
+      connectWebSocket: false,
+    );
+    addTearDown(secondController.dispose);
+    expect(secondController.clientTabId, controller.clientTabId);
+
+    host.sessionId = '9';
+    expect(secondController.effectiveSessionId, '9');
+    expect(secondController.clientTabId, controller.clientTabId);
+  });
+
+  test('compactFlutterWidgetTree prunes pub-cache framework nodes and sanitizes host URIs', () {
+    expect(
+      sanitizeInspectorFileUri('file:///workspace/pad_1/lib/main.dart'),
+      'lib/main.dart',
+    );
+    expect(
+      sanitizeInspectorFileUri(
+        'file:///usr/local/google/home/kevmoo/.pub-cache/hosted/pub.dev/material_ui-1.10.0/lib/src/scaffold.dart',
+      ),
+      'package:material_ui/src/scaffold.dart',
+    );
+    expect(
+      sanitizeInspectorFileUri(
+        'file:///usr/local/google/home/kevmoo/sdk/packages/flutter/lib/src/widgets/basic.dart',
+      ),
+      'package:flutter/src/widgets/basic.dart',
+    );
+    expect(isWorkspaceInspectorUri('file:///workspace/pad_1/lib/main.dart'), isTrue);
+    expect(
+      isWorkspaceInspectorUri(
+        'file:///usr/local/google/home/kevmoo/.pub-cache/hosted/pub.dev/material_ui-1.10.0/lib/src/scaffold.dart',
+      ),
+      isFalse,
+    );
+
+    final rawTree = <String, Object?>{
+      'description': '[root]',
+      'widgetRuntimeType': 'RootWidget',
+      'valueId': 'inspector-0',
+      'hasChildren': true,
+      'children': <Map<String, Object?>>[
+        <String, Object?>{
+          'description': 'M3DashboardApp',
+          'widgetRuntimeType': 'M3DashboardApp',
+          'valueId': 'inspector-1',
+          'locationId': 11,
+          'createdByLocalProject': true,
+          'creationLocation': <String, Object?>{
+            'file': 'file:///workspace/pad_1/lib/main.dart',
+            'line': 9,
+            'column': 7,
+          },
+          'children': <Map<String, Object?>>[
+            <String, Object?>{
+              'description': '_MaterialAppState',
+              'widgetRuntimeType': 'Semantics',
+              'valueId': 'inspector-2',
+              'createdByLocalProject': true,
+              'creationLocation': <String, Object?>{
+                'file':
+                    'file:///usr/local/google/home/kevmoo/.pub-cache/hosted/pub.dev/material_ui-1.10.0/lib/src/app.dart',
+                'line': 142,
+                'column': 12,
+              },
+              'children': <Map<String, Object?>>[
+                <String, Object?>{
+                  'description': 'Builder',
+                  'widgetRuntimeType': 'Builder',
+                  'valueId': 'inspector-3',
+                  'creationLocation': <String, Object?>{
+                    'file': 'file:///usr/local/google/home/kevmoo/sdk/packages/flutter/lib/src/widgets/basic.dart',
+                    'line': 88,
+                    'column': 9,
+                  },
+                  'children': <Map<String, Object?>>[
+                    <String, Object?>{
+                      'description': 'Text("Active Users: 1,284")',
+                      'widgetRuntimeType': 'Text',
+                      'textPreview': 'Active Users: 1,284',
+                      'stateful': false,
+                      'valueId': 'inspector-4',
+                      'createdByLocalProject': true,
+                      'creationLocation': <String, Object?>{
+                        'file': 'file:///workspace/pad_1/lib/widgets/kpi_card.dart',
+                        'line': 24,
+                        'column': 14,
+                      },
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    };
+
+    final compacted = compactFlutterWidgetTree(rawTree);
+    expect(compacted.totalNodeCount, 5);
+    expect(compacted.returnedNodeCount, 3);
+    expect(compacted.prunedFrameworkNodeCount, 2);
+
+    final serializedDefault = jsonEncode(compacted.tree);
+    expect(serializedDefault, isNot(contains('/usr/local/google/home')));
+    expect(serializedDefault, isNot(contains('valueId')));
+    expect(serializedDefault, isNot(contains('createdByLocalProject')));
+    expect(serializedDefault, contains('"file":"lib/main.dart"'));
+    expect(serializedDefault, contains('"file":"lib/widgets/kpi_card.dart"'));
+    expect(serializedDefault, contains('"textPreview":"Active Users: 1,284"'));
+
+    final unpruned = compactFlutterWidgetTree(rawTree, includeFrameworkNodes: true);
+    expect(unpruned.totalNodeCount, 5);
+    expect(unpruned.returnedNodeCount, 5);
+    expect(unpruned.prunedFrameworkNodeCount, 0);
+    final serializedFull = jsonEncode(unpruned.tree);
+    expect(serializedFull, isNot(contains('/usr/local/google/home')));
+    expect(serializedFull, contains('package:material_ui/src/app.dart'));
+    expect(serializedFull, contains('package:flutter/src/widgets/basic.dart'));
+  });
+
+  test('extractEntrypointLaunchSignature detects main() and root widget class changes', () {
+    const counterV1 = '''
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const CounterApp());
+}
+
+class CounterApp extends StatelessWidget {
+  const CounterApp({super.key});
+  @override
+  Widget build(BuildContext context) => const Text('v1');
+}
+''';
+    const counterV2BuildEdit = '''
+// Updated UI body only; hot_reload is safe!
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const CounterApp());
+}
+
+class CounterApp extends StatelessWidget {
+  const CounterApp({super.key});
+  @override
+  Widget build(BuildContext context) => const Text('v2 with fresh styling');
+}
+''';
+    const dashboardSwap = '''
+import 'package:flutter/material.dart';
+
+void main() => runApp(const M3DashboardApp());
+
+class M3DashboardApp extends StatelessWidget {
+  const M3DashboardApp({super.key});
+  @override
+  Widget build(BuildContext context) => const Text('dashboard');
+}
+''';
+    const statefulSwap = '''
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const CounterApp());
+}
+
+class CounterApp extends StatefulWidget {
+  const CounterApp({super.key});
+  @override
+  State<CounterApp> createState() => _CounterAppState();
+}
+class _CounterAppState extends State<CounterApp> {
+  @override
+  Widget build(BuildContext context) => const Text('stateful');
+}
+''';
+
+    expect(extractRootAppWidgetName(counterV1), 'CounterApp');
+    expect(extractRootAppWidgetName(dashboardSwap), 'M3DashboardApp');
+    expect(
+      extractEntrypointLaunchSignature(counterV1),
+      extractEntrypointLaunchSignature(counterV2BuildEdit),
+    );
+    expect(
+      extractEntrypointLaunchSignature(counterV1),
+      isNot(extractEntrypointLaunchSignature(dashboardSwap)),
+    );
+    expect(
+      extractEntrypointLaunchSignature(counterV1),
+      isNot(extractEntrypointLaunchSignature(statefulSwap)),
+    );
   });
 }

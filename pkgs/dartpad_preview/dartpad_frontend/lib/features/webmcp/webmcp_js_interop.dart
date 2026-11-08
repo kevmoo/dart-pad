@@ -6,10 +6,47 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
+import 'dart:math';
 
 import 'package:web/web.dart' as web;
 
 import 'webmcp_models.dart';
+
+/// `window.sessionStorage` key storing the stable per-tab WebMCP session alias.
+const webMcpTabIdStorageKey = 'dartpad.webmcp.tabId';
+
+const _tabIdAlphabet = '0123456789abcdefghijklmnopqrstuvwxyz';
+final _validClientTabIdPattern = RegExp(r'^tab-[a-z0-9]{4,12}$');
+
+/// Mints a fresh random `tab-<4chars>` client tab identifier.
+String mintRandomClientTabId() {
+  final rng = Random();
+  final suffix = StringBuffer();
+  for (var i = 0; i < 4; i++) {
+    suffix.write(_tabIdAlphabet[rng.nextInt(_tabIdAlphabet.length)]);
+  }
+  return 'tab-$suffix';
+}
+
+/// Reads or mints a stable per-tab WebMCP identifier (`tab-xxxx`) persisted in
+/// `window.sessionStorage` across reloads and bridge switches.
+String readOrMintClientTabId({String storageKey = webMcpTabIdStorageKey}) {
+  try {
+    final existing = web.window.sessionStorage.getItem(storageKey)?.trim();
+    if (existing != null && _validClientTabIdPattern.hasMatch(existing)) {
+      return existing;
+    }
+  } catch (_) {
+    // Restricted iframe/storage contexts fall back to an in-memory identifier.
+  }
+  final minted = mintRandomClientTabId();
+  try {
+    web.window.sessionStorage.setItem(storageKey, minted);
+  } catch (_) {
+    // Ignore sessionStorage quota or sandbox access errors.
+  }
+  return minted;
+}
 
 @JS('JSON.stringify')
 external JSString? _jsJsonStringify(JSAny? value);

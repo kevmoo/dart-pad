@@ -384,6 +384,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
   }
 
   void _onPersistenceChanged() {
+    _mcpController?.notifySessionChanged();
     if (mounted) {
       setState(() {});
     }
@@ -871,7 +872,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
             ConnectAgentDialog(
               key: const ValueKey('connect-agent-dialog'),
               statusListenable: _mcpController!.statusListenable,
-              sessionId: sessionId,
+              sessionId: _mcpController!.effectiveSessionId,
               onEnableBridge: _enableMcpBridge,
               onDisableBridge: _disableMcpBridge,
               onClose: () => setState(() => _isConnectAgentOpen = false),
@@ -953,7 +954,7 @@ final class _AppState extends State<App> implements DartPadMcpHost {
           ConnectAgentDialog(
             key: const ValueKey('connect-agent-dialog'),
             statusListenable: _mcpController!.statusListenable,
-            sessionId: sessionId,
+            sessionId: _mcpController!.effectiveSessionId,
             onEnableBridge: _enableMcpBridge,
             onDisableBridge: _disableMcpBridge,
             onClose: () => setState(() => _isConnectAgentOpen = false),

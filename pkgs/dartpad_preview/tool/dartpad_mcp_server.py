@@ -108,8 +108,11 @@ NO_PROXY_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 def log_err(msg: str) -> None:
     """Writes diagnostic output strictly to stderr so stdout stays pure JSON-RPC."""
     ts = time.strftime("%H:%M:%S")
-    sys.stderr.write(f"[dartpad-mcp {ts}] {msg}\n")
-    sys.stderr.flush()
+    try:
+        sys.stderr.write(f"[dartpad-mcp {ts}] {msg}\n")
+        sys.stderr.flush()
+    except BrokenPipeError:
+        pass
 
 
 def guess_content_type(path: str) -> str:
@@ -260,6 +263,7 @@ class BrowserTabSession:
     ws: WebSocketConnection
     peer: str
     session_id: str = ""
+    client_tab_id: str = ""
     url: str = ""
     tools: list[dict[str, Any]] = field(default_factory=list)
     native_session_id_props: set[str] = field(default_factory=set)
@@ -270,8 +274,20 @@ class BrowserTabSession:
         default_factory=dict
     )
 
+    def matches_session(self, target: str) -> bool:
+        return self.session_id == target or (
+            bool(self.client_tab_id) and self.client_tab_id == target
+        )
+
     def touch(self) -> None:
         self.last_active_at = time.time()
+
+
+def _resolve_wait_timeout(params: dict[str, Any], default_timeout: float) -> float:
+    override_ms = params.get("waitTimeoutMs")
+    if isinstance(override_ms, (int, float)) and not isinstance(override_ms, bool):
+        return max(0.0, float(override_ms) / 1000.0)
+    return default_timeout
 
 
 def _extract_session_id_from_url(url: str, fallback: str) -> str:
@@ -392,11 +408,18 @@ class BridgeHub:
         if method in ("webmcp/hello", "webmcp/toolsChanged"):
             params = data.get("params") if isinstance(data.get("params"), dict) else {}
             url = str(params.get("url") or tab.url or "")
+            raw_client_tid = params.get("clientTabId")
+            client_tid = (
+                str(raw_client_tid).strip()
+                if raw_client_tid is not None and str(raw_client_tid).strip()
+                else tab.client_tab_id
+            )
             raw_sid = params.get("sessionId")
-            if raw_sid is not None and str(raw_sid) != "":
-                sid = str(raw_sid)
+            if raw_sid is not None and str(raw_sid).strip() != "":
+                sid = str(raw_sid).strip()
             else:
-                sid = _extract_session_id_from_url(url, f"tab-{tab.conn_id}")
+                fallback = client_tid if client_tid else f"tab-{tab.conn_id}"
+                sid = _extract_session_id_from_url(url, fallback)
             raw_tools = params.get("tools")
             if isinstance(raw_tools, list):
                 tools, native_sid = _augment_tools_for_mcp(raw_tools)
@@ -405,6 +428,7 @@ class BridgeHub:
                 if tools:
                     self._cached_tools = copy.deepcopy(tools)
             tab.session_id = sid
+            tab.client_tab_id = client_tid
             tab.url = url
             tab.ready = True
             tab.touch()
@@ -412,9 +436,20 @@ class BridgeHub:
                 f"Tab ready: conn={tab.conn_id} sessionId={tab.session_id!r} "
                 f"tools={len(tab.tools)} url={tab.url}"
             )
+            await tab.ws.send_json(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "webmcp/welcome",
+                    "params": {"sessionId": sid},
+                }
+            )
             if "id" in data and data["id"] is not None:
                 await tab.ws.send_json(
-                    {"jsonrpc": "2.0", "id": data["id"], "result": {"ok": True}}
+                    {
+                        "jsonrpc": "2.0",
+                        "id": data["id"],
+                        "result": {"ok": True, "sessionId": sid},
+                    }
                 )
             async with self._tab_cond:
                 self._tab_cond.notify_all()
@@ -427,7 +462,6 @@ class BridgeHub:
 
         if "id" in data and ("result" in data or "error" in data):
             req_id = str(data["id"])
-            tab.touch()
             fut = tab.pending_requests.pop(req_id, None)
             if fut is not None and not fut.done():
                 fut.set_result(data)
@@ -444,7 +478,7 @@ class BridgeHub:
         if session_id is not None and str(session_id) != "":
             target = str(session_id)
             for t in ready:
-                if t.session_id == target:
+                if t.matches_session(target):
                     return t
             return None
         return ready[0]
@@ -477,13 +511,16 @@ class BridgeHub:
         tab: BrowserTabSession,
         method: str,
         params: dict[str, Any] | None = None,
+        *,
+        touch_tab: bool = True,
     ) -> dict[str, Any]:
         self._next_rpc_seq += 1
         rpc_id = f"req-{self._next_rpc_seq}"
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[dict[str, Any]] = loop.create_future()
         tab.pending_requests[rpc_id] = fut
-        tab.touch()
+        if touch_tab:
+            tab.touch()
 
         payload: dict[str, Any] = {
             "jsonrpc": "2.0",
@@ -513,6 +550,7 @@ class BridgeHub:
                 {
                     "connId": t.conn_id,
                     "sessionId": t.session_id,
+                    **({"clientTabId": t.client_tab_id} if t.client_tab_id else {}),
                     "url": t.url,
                     "toolCount": len(t.tools),
                     "connectedAt": round(t.connected_at, 3),
@@ -610,23 +648,34 @@ class BridgeHub:
     async def _handle_tools_list(
         self, req_id: Any, params: dict[str, Any]
     ) -> dict[str, Any]:
-        requested_sid = params.get("sessionId")
+        raw_sid = params.get("sessionId")
+        requested_sid = (
+            str(raw_sid).strip()
+            if raw_sid is not None and str(raw_sid).strip()
+            else None
+        )
+        wait_s = _resolve_wait_timeout(params, self.wait_timeout)
         tab = self.select_tab(requested_sid)
 
         if tab is None:
-            # During a page reload, respond immediately from cached tools if already seen.
+            # During a page reload, respond immediately from cached tools if unfiltered.
             if self._cached_tools and requested_sid is None:
                 return {
                     "jsonrpc": "2.0",
                     "id": req_id,
                     "result": {"tools": copy.deepcopy(self._cached_tools)},
                 }
-            # On cold start before any tab has connected, wait up to wait_timeout (20s).
-            tab = await self.wait_for_tab(requested_sid)
+            # On cold start or explicit `--session`, wait up to wait_s.
+            tab = await self.wait_for_tab(requested_sid, timeout=wait_s)
 
         if tab is not None:
             try:
-                ws_resp = await self.send_tab_rpc(tab, "tools/list", {})
+                ws_resp = await self.send_tab_rpc(
+                    tab,
+                    "tools/list",
+                    {},
+                    touch_tab=(requested_sid is None),
+                )
                 if "result" in ws_resp and isinstance(ws_resp["result"], dict):
                     raw_tools = ws_resp["result"].get("tools")
                     if isinstance(raw_tools, list):
@@ -648,6 +697,20 @@ class BridgeHub:
                         "id": req_id,
                         "result": {"tools": copy.deepcopy(tab.tools)},
                     }
+
+        if requested_sid is not None:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {
+                    "code": -32002,
+                    "message": (
+                        f"No connected DartPad browser tab (sessionId={requested_sid}) "
+                        f"after waiting {wait_s:.1f}s. Click 'Connect Agent' in your "
+                        f"DartPad Preview tab (port {self.bound_port})."
+                    ),
+                },
+            }
 
         return {
             "jsonrpc": "2.0",
@@ -688,7 +751,11 @@ class BridgeHub:
         if raw_sid is None:
             raw_sid = params.get("sessionId")
         requested_sid = str(raw_sid).strip() if raw_sid is not None else ""
-        tab = await self.wait_for_tab(requested_sid if requested_sid else None)
+        wait_s = _resolve_wait_timeout(params, self.wait_timeout)
+        tab = await self.wait_for_tab(
+            requested_sid if requested_sid else None,
+            timeout=wait_s,
+        )
         if tab is None:
             hint_url = (
                 f"http://127.0.0.1:{self.bound_port}/?s=3&mcp=1"
@@ -705,7 +772,7 @@ class BridgeHub:
                             "type": "text",
                             "text": (
                                 f"No connected DartPad browser tab{sid_msg} after "
-                                f"waiting {self.wait_timeout:.1f}s. Open {hint_url} in Chrome."
+                                f"waiting {wait_s:.1f}s. Open {hint_url} in Chrome."
                             ),
                         }
                     ],
@@ -718,7 +785,10 @@ class BridgeHub:
 
         try:
             ws_resp = await self.send_tab_rpc(
-                tab, "tools/call", {"name": name, "arguments": args}
+                tab,
+                "tools/call",
+                {"name": name, "arguments": args},
+                touch_tab=(not requested_sid),
             )
         except asyncio.TimeoutError:
             return {
@@ -1322,8 +1392,11 @@ async def run_stdio_loop(
     def write_stdout(obj: Any) -> None:
         encoded = (json.dumps(obj, separators=(",", ":")) + "\n").encode("utf-8")
         with stdout_lock:
-            sys.stdout.buffer.write(encoded)
-            sys.stdout.buffer.flush()
+            try:
+                sys.stdout.buffer.write(encoded)
+                sys.stdout.buffer.flush()
+            except BrokenPipeError:
+                stop_event.set()
 
     in_flight: set[asyncio.Task[None]] = set()
 
@@ -1401,12 +1474,19 @@ def _print_cli_rpc_outcome(resp: Any) -> int:
     return 0
 
 
+def _tab_entry_matches_session(entry: Any, target: str) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    return entry.get("sessionId") == target or entry.get("clientTabId") == target
+
+
 def run_cli_subcommand(args: argparse.Namespace) -> int:
     pos = list(args.command_args)
     verb = pos[0]
     rest = pos[1:]
     mcp_url, health_url = _resolve_client_urls(args)
-    total_timeout = args.wait_timeout + args.call_timeout + 5.0
+    effective_wait = args.wait_timeout if args.wait_timeout is not None else 20.0
+    total_timeout = effective_wait + args.call_timeout + 5.0
 
     if verb == "status":
         if rest:
@@ -1416,9 +1496,32 @@ def run_cli_subcommand(args: argparse.Namespace) -> int:
         if health is None:
             sys.stderr.write(f"No DartPad MCP bridge reachable at {health_url}.\n")
             return 1
-        sys.stdout.write(json.dumps(health, indent=2) + "\n")
         tabs = health.get("connectedTabs")
-        if args.require_tab and (not isinstance(tabs, list) or len(tabs) == 0):
+        tab_list = tabs if isinstance(tabs, list) else []
+        requested_sid = args.session.strip() if args.session and args.session.strip() else None
+        if requested_sid is not None:
+            matched = any(_tab_entry_matches_session(t, requested_sid) for t in tab_list)
+            health["requestedSessionId"] = requested_sid
+            health["matchedSession"] = matched
+        else:
+            matched = len(tab_list) > 0
+        sys.stdout.write(json.dumps(health, indent=2) + "\n")
+        if args.require_tab and not matched:
+            if requested_sid is not None:
+                labels = [
+                    str(t.get("sessionId"))
+                    for t in tab_list
+                    if isinstance(t, dict) and t.get("sessionId") is not None
+                ]
+                connected_summary = (
+                    f"connected sessions: {', '.join(labels)}"
+                    if labels
+                    else "connected sessions: none"
+                )
+                sys.stderr.write(
+                    f'No connected DartPad tab matching session "{requested_sid}" '
+                    f"at {health_url} ({connected_summary}).\n"
+                )
             return 2
         return 0
 
@@ -1429,6 +1532,8 @@ def run_cli_subcommand(args: argparse.Namespace) -> int:
         params: dict[str, Any] = {}
         if args.session:
             params["sessionId"] = args.session
+        if args.wait_timeout is not None:
+            params["waitTimeoutMs"] = round(args.wait_timeout * 1000)
         try:
             resp = _post_mcp_http_sync(
                 mcp_url,
@@ -1463,6 +1568,9 @@ def run_cli_subcommand(args: argparse.Namespace) -> int:
             return 64
         if args.session and "sessionId" not in parsed_args:
             parsed_args["sessionId"] = args.session
+        call_params: dict[str, Any] = {"name": tool_name, "arguments": parsed_args}
+        if args.wait_timeout is not None:
+            call_params["waitTimeoutMs"] = round(args.wait_timeout * 1000)
         try:
             resp = _post_mcp_http_sync(
                 mcp_url,
@@ -1470,7 +1578,7 @@ def run_cli_subcommand(args: argparse.Namespace) -> int:
                     "jsonrpc": "2.0",
                     "id": 1,
                     "method": "tools/call",
-                    "params": {"name": tool_name, "arguments": parsed_args},
+                    "params": call_params,
                 },
                 total_timeout,
                 retry_connect=False,
@@ -1495,10 +1603,12 @@ async def async_main(args: argparse.Namespace) -> int:
         except NotImplementedError:
             pass
 
+    effective_wait = args.wait_timeout if args.wait_timeout is not None else 20.0
+
     # Mode A: `--stdio` forwarding to `--connect-http <URL>` or an already-active bridge on `:port`.
     proxy_url = await asyncio.to_thread(_resolve_stdio_proxy_url, args)
     if proxy_url is not None:
-        total_timeout = args.wait_timeout + args.call_timeout + 10.0
+        total_timeout = effective_wait + args.call_timeout + 10.0
         log_err(f"Starting stdio MCP client forwarding to {proxy_url}")
 
         async def forward_http(msg: Any) -> Any | None:
@@ -1515,7 +1625,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
     hub = BridgeHub(
         static_dir=os.path.abspath(args.static_dir),
-        wait_timeout=args.wait_timeout,
+        wait_timeout=effective_wait,
         call_timeout=args.call_timeout,
     )
     sock = create_dual_stack_socket(args.host, port)
@@ -1595,7 +1705,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--session",
         default=None,
-        help="Target a specific DartPad tab sessionId (`s` query param) in `tools` or `call`.",
+        help="Target a specific DartPad tab sessionId (`s` query param or `tab-xxxx`) in `status`, `tools`, or `call`.",
     )
     parser.add_argument(
         "--stdin",
@@ -1605,7 +1715,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--require-tab",
         action="store_true",
-        help="Exit with code 2 from `status` when zero DartPad tabs are connected.",
+        help="Exit with code 2 from `status` when no matching DartPad tab is connected.",
     )
     parser.add_argument(
         "--open-browser",
@@ -1620,7 +1730,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--wait-timeout",
         type=float,
-        default=20.0,
+        default=None,
         help="Seconds to wait for a browser tab to connect on cold start (default: 20).",
     )
     parser.add_argument(
@@ -1642,16 +1752,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     pos = list(args.command_args)
-    if pos and pos[0] != "serve":
-        sys.exit(run_cli_subcommand(args))
-    if len(pos) > 1:
-        sys.stderr.write(f"Unexpected extra arguments for `serve`: {' '.join(pos[1:])}\n")
-        sys.exit(64)
     try:
-        code = asyncio.run(async_main(args))
-    except KeyboardInterrupt:
-        code = 0
-    sys.exit(code)
+        if pos and pos[0] != "serve":
+            code = run_cli_subcommand(args)
+            sys.stdout.flush()
+            sys.stderr.flush()
+            sys.exit(code)
+        if len(pos) > 1:
+            sys.stderr.write(
+                f"Unexpected extra arguments for `serve`: {' '.join(pos[1:])}\n"
+            )
+            sys.exit(64)
+        try:
+            code = asyncio.run(async_main(args))
+        except KeyboardInterrupt:
+            code = 0
+        sys.exit(code)
+    except BrokenPipeError:
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
+        except OSError:
+            pass
+        sys.exit(0)
 
 
 if __name__ == "__main__":

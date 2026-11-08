@@ -22,6 +22,7 @@ import '../workspace/workspace_session.dart';
 import 'webmcp_js_interop.dart';
 import 'webmcp_models.dart';
 import 'webmcp_ws_client.dart';
+import 'widget_tree_compactor.dart';
 
 const _allowedPubCommands = <String>{'get', 'add', 'remove', 'upgrade', 'outdated'};
 const _allowedRunActions = <String>{'auto', 'run', 'hot_reload', 'hot_restart'};
@@ -56,13 +57,14 @@ abstract interface class DartPadMcpHost {
 final class DartPadMcpController {
   DartPadMcpController({
     required this.host,
+    String? clientTabId,
     bool installBrowserRegistry = true,
     bool connectWebSocket = true,
     this.analyzerIdleWindow = const Duration(milliseconds: 180),
     this.analyzerSettleTimeout = const Duration(seconds: 15),
     this.postRunFrameDelay = const Duration(milliseconds: 300),
     this.customPubRunner,
-  }) {
+  }) : clientTabId = (clientTabId != null && clientTabId.isNotEmpty) ? clientTabId : readOrMintClientTabId() {
     tools = _buildToolSpecs();
     if (installBrowserRegistry) {
       _browserRegistry = WebMcpBrowserRegistry()..registerTools(tools);
@@ -76,6 +78,18 @@ final class DartPadMcpController {
   }
 
   final DartPadMcpHost host;
+
+  /// Stable client-side per-tab session alias (`tab-xxxx`) persisted in
+  /// `window.sessionStorage` across reloads and bridge switches.
+  final String clientTabId;
+
+  /// Effective session identifier for this tab: prefers persisted/URL `s`
+  /// session id when assigned, falling back to [clientTabId].
+  String get effectiveSessionId {
+    final explicit = host.sessionId;
+    return (explicit != null && explicit.isNotEmpty) ? explicit : clientTabId;
+  }
+
   final Duration analyzerIdleWindow;
   final Duration analyzerSettleTimeout;
   final Duration postRunFrameDelay;
@@ -101,6 +115,8 @@ final class DartPadMcpController {
 
   WebMcpBrowserRegistry? _browserRegistry;
   WebMcpWsClient? _wsClient;
+  WorkspaceSession? _trackedLaunchSession;
+  final Map<String, String> _lastStartedLaunchSignatures = <String, String>{};
   bool _disposed = false;
 
   /// Starts or retargets the outbound loopback MCP WebSocket bridge in memory
@@ -131,7 +147,8 @@ final class DartPadMcpController {
     client = WebMcpWsClient(
       endpoint: target,
       tools: tools,
-      getSessionId: () => host.sessionId,
+      getSessionId: () => effectiveSessionId,
+      clientTabId: clientTabId,
       getPageUrl: () => host.currentUri.toString(),
       onConnectionChanged: ({required isConnected}) {
         if (_disposed || !identical(_wsClient, client)) {
@@ -139,8 +156,15 @@ final class DartPadMcpController {
         }
         _status.value = _status.value.copyWith(
           phase: isConnected ? McpConnectionPhase.connected : McpConnectionPhase.connecting,
+          clearAssignedSessionId: !isConnected,
           activeToolCalls: isConnected ? _status.value.activeToolCalls : 0,
         );
+      },
+      onAssignedSessionId: (assignedSid) {
+        if (_disposed || !identical(_wsClient, client)) {
+          return;
+        }
+        _status.value = _status.value.copyWith(assignedSessionId: assignedSid);
       },
       onToolActivity: (toolName, {required started}) {
         if (_disposed || !identical(_wsClient, client)) {
@@ -335,7 +359,9 @@ final class DartPadMcpController {
           'action': <String, Object?>{
             'type': 'string',
             'enum': <String>['auto', 'run', 'hot_reload', 'hot_restart'],
-            'description': 'Execution action (defaults to "auto", preferring hot_reload when available).',
+            'description':
+                'Execution action (defaults to "auto", which hot-reloads UI edits or '
+                'auto-promotes to hot_restart when main() or the root runApp widget changes).',
           },
           'entrypoint': <String, Object?>{
             'type': 'string',
@@ -371,12 +397,19 @@ final class DartPadMcpController {
     WebMcpToolSpec(
       name: 'dartpad_inspect_widget_tree',
       description:
-          'Connects to the running sandbox Dart VM Service and returns the Flutter widget summary '
-          'tree (with text previews) or isolate details for non-Flutter runs.',
+          'Connects to the running sandbox Dart VM Service and returns the compacted '
+          'workspace Flutter widget tree (with text previews) or isolate details for non-Flutter runs.',
       readOnlyHint: true,
       inputSchema: const <String, Object?>{
         'type': 'object',
-        'properties': <String, Object?>{},
+        'properties': <String, Object?>{
+          'includeFrameworkNodes': <String, Object?>{
+            'type': 'boolean',
+            'description':
+                'When true, retains internal framework and pub-cache widget nodes instead of '
+                'compacting to user workspace widgets (defaults to false).',
+          },
+        },
       },
       handler: _handleInspectWidgetTree,
     ),
@@ -387,7 +420,8 @@ final class DartPadMcpController {
     final sdk = session.repository.sdk;
     final diagnostics = session.diagnostics.diagnostics;
     return <String, Object?>{
-      'sessionId': host.sessionId,
+      'sessionId': effectiveSessionId,
+      'clientTabId': clientTabId,
       'sdk': sdk.id,
       'sdkVersion': sdk.flutterVersion ?? sdk.dartVersion,
       'dartVersion': sdk.dartVersion,
@@ -470,6 +504,7 @@ final class DartPadMcpController {
   Future<Map<String, Object?>> _handleWriteFiles(Map<String, Object?> args) async {
     final session = await _waitForActiveSession();
     await _awaitWorkspaceToolsReady();
+    await _captureBaselineLaunchSignatureIfNeeded(session);
 
     final openInEditor = args['openInEditor'] as bool? ?? true;
     final deleteList = _parseStringList(args['deletePaths'], fieldName: 'deletePaths');
@@ -741,7 +776,7 @@ final class DartPadMcpController {
         : ProjectLoader.normalizePath(rawEntrypoint);
 
     await _waitForPreviewIdle(session);
-    await _dispatchPreviewAction(
+    final ({String appliedAction, String? rootWidget}) outcome = await _dispatchPreviewAction(
       session,
       action: action,
       requestedEntrypoint: requestedEntrypoint,
@@ -758,8 +793,10 @@ final class DartPadMcpController {
       ?preview.lastActionError,
     ];
     return <String, Object?>{
+      'appliedAction': outcome.appliedAction,
       'previewState': _previewStateName(preview.state),
       'entrypoint': preview.entrypoint,
+      if (outcome.rootWidget case final String rootWidget) 'rootWidget': rootWidget,
       'mode': preview.previewMode.name,
       'canHotReload': preview.canHotReload,
       'logs': <String>[
@@ -771,13 +808,19 @@ final class DartPadMcpController {
     };
   }
 
-  Future<void> _dispatchPreviewAction(
+  Future<({String appliedAction, String? rootWidget})> _dispatchPreviewAction(
     WorkspaceSession session, {
     required String action,
     required String? requestedEntrypoint,
   }) async {
+    _syncTrackedLaunchSession(session);
     final preview = session.preview;
     final sameEntrypoint = requestedEntrypoint == null || requestedEntrypoint == preview.entrypoint;
+    final targetEntrypoint = requestedEntrypoint ?? preview.entrypoint;
+    final currentSource = targetEntrypoint == null ? null : await _readWorkspaceTextOrNull(session, targetEntrypoint);
+    final currentSignature = currentSource == null ? null : extractEntrypointLaunchSignature(currentSource);
+    final rootWidget = currentSource == null ? null : extractRootAppWidgetName(currentSource);
+
     switch (action) {
       case 'hot_reload':
         if (!preview.canHotReload) {
@@ -787,23 +830,81 @@ final class DartPadMcpController {
           );
         }
         await preview.hotReloadCode();
+        return (appliedAction: 'hot_reload', rootWidget: rootWidget);
       case 'hot_restart':
         if (preview.canRestart && sameEntrypoint) {
           await preview.restartCode();
-        } else {
-          await preview.runCode(_requireEntrypoint(requestedEntrypoint ?? preview.entrypoint));
+          _recordLaunchSignature(targetEntrypoint, currentSignature);
+          return (appliedAction: 'hot_restart', rootWidget: rootWidget);
         }
+        final resolved = _requireEntrypoint(targetEntrypoint);
+        await preview.runCode(resolved);
+        _recordLaunchSignature(resolved, currentSignature);
+        return (appliedAction: 'run', rootWidget: rootWidget);
       case 'run':
-        await preview.runCode(_requireEntrypoint(requestedEntrypoint ?? preview.entrypoint));
+        final resolved = _requireEntrypoint(targetEntrypoint);
+        await preview.runCode(resolved);
+        _recordLaunchSignature(resolved, currentSignature);
+        return (appliedAction: 'run', rootWidget: rootWidget);
       case 'auto':
-        if (preview.canHotReload && sameEntrypoint) {
+      default:
+        final previousSignature = targetEntrypoint == null ? null : _lastStartedLaunchSignatures[targetEntrypoint];
+        final launchSignatureChanged =
+            previousSignature != null && currentSignature != null && previousSignature != currentSignature;
+        if (preview.canHotReload && sameEntrypoint && !launchSignatureChanged) {
           await preview.hotReloadCode();
-        } else if (preview.canRestart && sameEntrypoint) {
-          await preview.restartCode();
-        } else {
-          await preview.runCode(_requireEntrypoint(requestedEntrypoint ?? preview.entrypoint));
+          return (appliedAction: 'hot_reload', rootWidget: rootWidget);
         }
+        if (preview.canRestart && sameEntrypoint) {
+          await preview.restartCode();
+          _recordLaunchSignature(targetEntrypoint, currentSignature);
+          return (appliedAction: 'hot_restart', rootWidget: rootWidget);
+        }
+        final resolved = _requireEntrypoint(targetEntrypoint);
+        await preview.runCode(resolved);
+        _recordLaunchSignature(resolved, currentSignature);
+        return (appliedAction: 'run', rootWidget: rootWidget);
     }
+  }
+
+  void _syncTrackedLaunchSession(WorkspaceSession session) {
+    if (!identical(_trackedLaunchSession, session)) {
+      _trackedLaunchSession = session;
+      _lastStartedLaunchSignatures.clear();
+    }
+  }
+
+  void _recordLaunchSignature(String? entrypoint, String? signature) {
+    if (entrypoint != null && entrypoint.isNotEmpty && signature != null) {
+      _lastStartedLaunchSignatures[entrypoint] = signature;
+    }
+  }
+
+  Future<void> _captureBaselineLaunchSignatureIfNeeded(WorkspaceSession session) async {
+    _syncTrackedLaunchSession(session);
+    final entrypoint = session.preview.entrypoint;
+    if (entrypoint == null ||
+        entrypoint.isEmpty ||
+        _lastStartedLaunchSignatures.containsKey(entrypoint) ||
+        (!session.preview.canHotReload && !session.preview.canRestart)) {
+      return;
+    }
+    final source = await _readWorkspaceTextOrNull(session, entrypoint);
+    if (source != null) {
+      _lastStartedLaunchSignatures[entrypoint] = extractEntrypointLaunchSignature(source);
+    }
+  }
+
+  Future<String?> _readWorkspaceTextOrNull(WorkspaceSession session, String path) async {
+    final openTab = session.tabs.getTab(path);
+    if (openTab is CodeMirrorTab) {
+      return openTab.content;
+    }
+    final api = session.repository.workspaceResourceApi;
+    if (!await api.fileExist(path)) {
+      return null;
+    }
+    return api.readFileAsText(path);
   }
 
   Future<Map<String, Object?>> _handleGetLogs(Map<String, Object?> args) async {
@@ -831,18 +932,28 @@ final class DartPadMcpController {
     };
   }
 
-  Future<Map<String, Object?>> _handleInspectWidgetTree(Map<String, Object?> _) async {
+  Future<Map<String, Object?>> _handleInspectWidgetTree(Map<String, Object?> args) async {
     final session = await _waitForActiveSession();
+    final includeFrameworkNodes = args['includeFrameworkNodes'] as bool? ?? false;
     try {
-      return await _inspectSandboxVm(session, forceReconnect: false);
+      return await _inspectSandboxVm(
+        session,
+        forceReconnect: false,
+        includeFrameworkNodes: includeFrameworkNodes,
+      );
     } catch (_) {
-      return _inspectSandboxVm(session, forceReconnect: true);
+      return _inspectSandboxVm(
+        session,
+        forceReconnect: true,
+        includeFrameworkNodes: includeFrameworkNodes,
+      );
     }
   }
 
   Future<Map<String, Object?>> _inspectSandboxVm(
     WorkspaceSession session, {
     required bool forceReconnect,
+    required bool includeFrameworkNodes,
   }) async {
     final vmService = await session.preview.connectVmService(forceReconnect: forceReconnect);
     final vm = await vmService.getVM();
@@ -859,16 +970,24 @@ final class DartPadMcpController {
     if (session.preview.previewMode == RunMode.flutter) {
       final flutterTree = await _tryInspectFlutterTree(vmService, isolateId);
       if (flutterTree != null) {
+        final compacted = compactFlutterWidgetTree(
+          flutterTree,
+          includeFrameworkNodes: includeFrameworkNodes,
+        );
         return <String, Object?>{
           'isolateId': isolateId,
           'isolateName': isolateRef.name,
           'isFlutter': true,
-          'tree': flutterTree,
+          'totalNodeCount': compacted.totalNodeCount,
+          'returnedNodeCount': compacted.returnedNodeCount,
+          'prunedFrameworkNodeCount': compacted.prunedFrameworkNodeCount,
+          'tree': compacted.tree,
         };
       }
     }
 
     final isolate = await vmService.getIsolate(isolateId);
+    final rawRootUri = isolate.rootLib?.uri;
     return <String, Object?>{
       'isolateId': isolateId,
       'isolateName': isolate.name,
@@ -878,7 +997,7 @@ final class DartPadMcpController {
         'id': isolate.id,
         'name': isolate.name,
         'number': isolate.number,
-        'rootLib': isolate.rootLib?.uri,
+        'rootLib': rawRootUri == null ? null : sanitizeInspectorFileUri(rawRootUri),
         'extensionRPCs': isolate.extensionRPCs ?? const <String>[],
       },
     };

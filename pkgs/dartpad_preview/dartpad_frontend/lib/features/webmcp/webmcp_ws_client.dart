@@ -18,8 +18,10 @@ final class WebMcpWsClient {
     required List<WebMcpToolSpec> tools,
     required this.getSessionId,
     required this.getPageUrl,
+    this.clientTabId,
     this.reconnectDelay = const Duration(seconds: 1),
     this.onConnectionChanged,
+    this.onAssignedSessionId,
     this.onToolActivity,
   }) : _tools = List<WebMcpToolSpec>.unmodifiable(tools),
        _toolsByName = <String, WebMcpToolSpec>{
@@ -31,8 +33,10 @@ final class WebMcpWsClient {
   final Map<String, WebMcpToolSpec> _toolsByName;
   final String? Function() getSessionId;
   final String Function() getPageUrl;
+  final String? clientTabId;
   final Duration reconnectDelay;
   final void Function({required bool isConnected})? onConnectionChanged;
+  final void Function(String sessionId)? onAssignedSessionId;
   final void Function(String toolName, {required bool started})? onToolActivity;
 
   web.WebSocket? _socket;
@@ -149,6 +153,7 @@ final class WebMcpWsClient {
       'method': 'webmcp/hello',
       'params': <String, Object?>{
         'sessionId': sessionId,
+        if (clientTabId case final String tabId when tabId.isNotEmpty) 'clientTabId': tabId,
         'url': url,
         'tools': <Map<String, Object?>>[
           for (final tool in _tools) tool.toWireJson(),
@@ -169,12 +174,30 @@ final class WebMcpWsClient {
       return;
     }
 
+    final method = message['method'] as String?;
+    if (method == 'webmcp/welcome') {
+      final rawParams = message['params'];
+      if (rawParams is Map && rawParams['sessionId'] is String) {
+        final sid = (rawParams['sessionId'] as String).trim();
+        if (sid.isNotEmpty) {
+          onAssignedSessionId?.call(sid);
+        }
+      }
+      return;
+    }
+
     if (!message.containsKey('id')) {
       return;
     }
     final id = message['id'];
-    final method = message['method'] as String?;
     if (method == null) {
+      final rawResult = message['result'];
+      if (rawResult is Map && rawResult['sessionId'] is String) {
+        final sid = (rawResult['sessionId'] as String).trim();
+        if (sid.isNotEmpty) {
+          onAssignedSessionId?.call(sid);
+        }
+      }
       return;
     }
 

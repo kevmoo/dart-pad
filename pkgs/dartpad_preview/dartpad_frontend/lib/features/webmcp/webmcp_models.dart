@@ -29,6 +29,7 @@ final class McpBridgeStatus {
     this.phase = McpConnectionPhase.disabled,
     this.port = 8787,
     this.endpoint,
+    this.assignedSessionId,
     this.activeToolCalls = 0,
     this.lastToolName,
   });
@@ -36,6 +37,7 @@ final class McpBridgeStatus {
   final McpConnectionPhase phase;
   final int port;
   final Uri? endpoint;
+  final String? assignedSessionId;
   final int activeToolCalls;
   final String? lastToolName;
 
@@ -46,12 +48,15 @@ final class McpBridgeStatus {
     int? port,
     Uri? endpoint,
     bool clearEndpoint = false,
+    String? assignedSessionId,
+    bool clearAssignedSessionId = false,
     int? activeToolCalls,
     String? lastToolName,
   }) => McpBridgeStatus(
     phase: phase ?? this.phase,
     port: port ?? this.port,
     endpoint: clearEndpoint ? null : (endpoint ?? this.endpoint),
+    assignedSessionId: clearAssignedSessionId ? null : (assignedSessionId ?? this.assignedSessionId),
     activeToolCalls: activeToolCalls ?? this.activeToolCalls,
     lastToolName: lastToolName ?? this.lastToolName,
   );
@@ -63,11 +68,19 @@ final class McpBridgeStatus {
           phase == other.phase &&
           port == other.port &&
           endpoint == other.endpoint &&
+          assignedSessionId == other.assignedSessionId &&
           activeToolCalls == other.activeToolCalls &&
           lastToolName == other.lastToolName;
 
   @override
-  int get hashCode => Object.hash(phase, port, endpoint, activeToolCalls, lastToolName);
+  int get hashCode => Object.hash(
+    phase,
+    port,
+    endpoint,
+    assignedSessionId,
+    activeToolCalls,
+    lastToolName,
+  );
 }
 
 /// Declarative specification and handler for a single DartPad WebMCP tool.
