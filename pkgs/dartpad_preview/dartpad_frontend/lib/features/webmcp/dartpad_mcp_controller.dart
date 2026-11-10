@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'package:dartpad/dartpad.dart';
 import 'package:dartpad_editor/dartpad_editor.dart';
 import 'package:jaspr/jaspr.dart';
+import 'package:yaml/yaml.dart';
 
 import '../editor/codemirror/code_mirror_tab.dart';
 import '../preview/models/preview_state.dart';
@@ -233,7 +234,7 @@ final class DartPadMcpController {
       name: 'dartpad_get_status',
       description:
           'Returns live DartPad workspace status including sessionId, SDK, run mode, '
-          'entrypoint, preview state, open tabs, analyzer activity, and diagnostic counts.',
+          'entrypoint, dependencies, preview state, open tabs, analyzer activity, and diagnostic counts.',
       readOnlyHint: true,
       inputSchema: const <String, Object?>{
         'type': 'object',
@@ -419,6 +420,7 @@ final class DartPadMcpController {
     final session = await _waitForActiveSession();
     final sdk = session.repository.sdk;
     final diagnostics = session.diagnostics.diagnostics;
+    final dependencies = await _readWorkspaceDependencies(session);
     return <String, Object?>{
       'sessionId': effectiveSessionId,
       'clientTabId': clientTabId,
@@ -428,6 +430,7 @@ final class DartPadMcpController {
       'flutterVersion': sdk.flutterVersion,
       'runMode': session.preview.previewMode.name,
       'entrypoint': session.preview.entrypoint,
+      'dependencies': dependencies,
       'previewState': _previewStateName(session.preview.state),
       'canHotReload': session.preview.canHotReload,
       'isInitializing': host.isInitializingWorkspace,
@@ -436,6 +439,24 @@ final class DartPadMcpController {
       'activeFile': session.tabs.activeFile,
       'diagnosticCounts': _countDiagnosticsBySeverity(diagnostics),
     };
+  }
+
+  Future<List<String>> _readWorkspaceDependencies(WorkspaceSession session) async {
+    final projectRoot = normalizeWorkspacePath(session.initialProject.root);
+    final pubspecPath = joinWorkspacePath(projectRoot, 'pubspec.yaml');
+    try {
+      final String? rawPubspec;
+      if (session.tabs.getTab(pubspecPath) case final CodeMirrorTab openTab) {
+        rawPubspec = openTab.content;
+      } else if (await session.repository.workspaceResourceApi.fileExist(pubspecPath)) {
+        rawPubspec = await session.repository.workspaceResourceApi.readFileAsText(pubspecPath);
+      } else {
+        rawPubspec = null;
+      }
+      return rawPubspec == null ? const <String>[] : extractPubspecDependencyNames(rawPubspec);
+    } catch (_) {
+      return const <String>[];
+    }
   }
 
   Future<Map<String, Object?>> _handleListFiles(Map<String, Object?> args) async {
@@ -1357,4 +1378,26 @@ List<({String path, String content})> _parseFileWrites(Object? raw) {
     writes.add((path: ProjectLoader.normalizePath(path), content: content));
   }
   return writes;
+}
+
+/// Extracts sorted package names from the `dependencies:` mapping of a
+/// `pubspec.yaml` document, returning an empty list if absent or malformed.
+List<String> extractPubspecDependencyNames(String pubspecSource) {
+  try {
+    final doc = loadYaml(pubspecSource);
+    if (doc is! YamlMap) {
+      return const <String>[];
+    }
+    final deps = doc['dependencies'];
+    if (deps is! YamlMap) {
+      return const <String>[];
+    }
+    final names = <String>[
+      for (final key in deps.keys)
+        if (key is String && key.trim().isNotEmpty) key.trim(),
+    ]..sort();
+    return List<String>.unmodifiable(names);
+  } catch (_) {
+    return const <String>[];
+  }
 }

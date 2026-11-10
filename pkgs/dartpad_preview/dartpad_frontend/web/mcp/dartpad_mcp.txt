@@ -35,6 +35,7 @@ Usage:
 Options:
   --port <port>           TCP port to listen on or query (default: 8787).
   --host <host>           Interface to bind: localhost (default), 127.0.0.1, ::1, 0.0.0.0, ::.
+  --detach                Start the bridge detached in the background, print JSON info, and exit.
   --stdio                 Serve MCP JSON-RPC 2.0 over stdin/stdout (auto-attaches if :port is active).
   --connect-http <url>    Forward stdio or CLI requests to an existing http://...:<port>/mcp endpoint.
   --wait-timeout <sec>    Seconds to wait for a DartPad tab to connect on cold start (default: 20).
@@ -45,6 +46,216 @@ Options:
   --require-tab           Exit with code 2 from `status` when no matching DartPad tab is connected.
   -h, --help              Show this usage information.
 ''';
+
+const List<Map<String, Object?>>
+_rawBaselineDartPadTools = <Map<String, Object?>>[
+  <String, Object?>{
+    'name': 'dartpad_get_status',
+    'description':
+        'Returns live DartPad workspace status including sessionId, SDK, run '
+        'mode, entrypoint, dependencies, preview state, open tabs, analyzer '
+        'activity, and diagnostic counts.',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{},
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_list_files',
+    'description': 'Lists files and folders in the active DartPad workspace.',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'path': <String, Object?>{
+          'type': 'string',
+          'description':
+              'Workspace-relative directory path (defaults to project root).',
+        },
+        'recursive': <String, Object?>{
+          'type': 'boolean',
+          'description':
+              'Whether to recurse into subdirectories (defaults to true).',
+        },
+      },
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_read_file',
+    'description':
+        'Reads the current contents of a workspace file (preferring live open '
+        'editor buffers).',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'path': <String, Object?>{
+          'type': 'string',
+          'description':
+              'Workspace-relative file path to read (for example '
+              '"lib/main.dart").',
+        },
+      },
+      'required': <String>['path'],
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_write_files',
+    'description':
+        'Creates, updates, or deletes files in the DartPad workspace, syncs '
+        'open CodeMirror tabs and the worker filesystem, waits for the Dart '
+        'analyzer to settle, and returns diagnostics.',
+    'annotations': <String, Object?>{'readOnlyHint': false},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'files': <String, Object?>{
+          'type': 'array',
+          'description': 'Files to create or overwrite.',
+          'items': <String, Object?>{
+            'type': 'object',
+            'properties': <String, Object?>{
+              'path': <String, Object?>{'type': 'string'},
+              'content': <String, Object?>{'type': 'string'},
+            },
+            'required': <String>['path', 'content'],
+          },
+        },
+        'deletePaths': <String, Object?>{
+          'type': 'array',
+          'description': 'Workspace-relative file or folder paths to delete.',
+          'items': <String, Object?>{'type': 'string'},
+        },
+        'openInEditor': <String, Object?>{
+          'type': 'boolean',
+          'description':
+              'Whether written files should be opened in editor tabs '
+              '(defaults to true).',
+        },
+      },
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_get_diagnostics',
+    'description':
+        'Waits for active analysis to settle and returns current Dart analyzer '
+        'diagnostics.',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'severity': <String, Object?>{
+          'type': 'string',
+          'description':
+              'Optional severity filter: error, warning, info, or hint.',
+        },
+      },
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_pub',
+    'description':
+        'Runs a Dart/Flutter pub command (get, add, remove, upgrade, outdated) '
+        'in the workspace.',
+    'annotations': <String, Object?>{'readOnlyHint': false},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'command': <String, Object?>{
+          'type': 'string',
+          'enum': <String>['get', 'add', 'remove', 'upgrade', 'outdated'],
+          'description': 'Pub subcommand to execute.',
+        },
+        'args': <String, Object?>{
+          'type': 'array',
+          'items': <String, Object?>{'type': 'string'},
+          'description':
+              'Optional arguments passed to pub (such as package names for '
+              '"add").',
+        },
+      },
+      'required': <String>['command'],
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_run_or_reload',
+    'description':
+        'Compiles and runs, hot-reloads, or hot-restarts the preview '
+        'application and returns updated preview state, console logs, runtime '
+        'errors, and analyzer diagnostics.',
+    'annotations': <String, Object?>{'readOnlyHint': false},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'action': <String, Object?>{
+          'type': 'string',
+          'enum': <String>['auto', 'run', 'hot_reload', 'hot_restart'],
+          'description':
+              'Execution action (defaults to "auto", which hot-reloads UI '
+              'edits or auto-promotes to hot_restart when main() or the root '
+              'runApp widget changes).',
+        },
+        'entrypoint': <String, Object?>{
+          'type': 'string',
+          'description': 'Optional workspace-relative Dart entrypoint to run.',
+        },
+      },
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_get_logs',
+    'description':
+        'Reads buffered console output and runtime errors from the preview '
+        'sandbox.',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'errorsOnly': <String, Object?>{
+          'type': 'boolean',
+          'description': 'When true, returns only error entries.',
+        },
+        'clear': <String, Object?>{
+          'type': 'boolean',
+          'description':
+              'When true, clears the sandbox log buffer after reading.',
+        },
+        'limit': <String, Object?>{
+          'type': 'integer',
+          'description': 'Maximum number of most-recent log entries to return.',
+        },
+      },
+    },
+  },
+  <String, Object?>{
+    'name': 'dartpad_inspect_widget_tree',
+    'description':
+        'Connects to the running sandbox Dart VM Service and returns the '
+        'compacted workspace Flutter widget tree (with text previews) or '
+        'isolate details for non-Flutter runs.',
+    'annotations': <String, Object?>{'readOnlyHint': true},
+    'inputSchema': <String, Object?>{
+      'type': 'object',
+      'properties': <String, Object?>{
+        'includeFrameworkNodes': <String, Object?>{
+          'type': 'boolean',
+          'description':
+              'When true, retains internal framework and pub-cache widget '
+              'nodes instead of compacting to user workspace widgets '
+              '(defaults to false).',
+        },
+      },
+    },
+  },
+];
+
+/// Baseline DartPad WebMCP tool definitions served on unscoped cold `tools/list`
+/// requests before the first browser tab connects.
+final List<Map<String, Object?>> defaultDartPadTools =
+    List<Map<String, Object?>>.unmodifiable(
+      _augmentToolsForMcp(_rawBaselineDartPadTools).tools,
+    );
 
 /// CLI subcommands supported by `dartpad_mcp`.
 enum BridgeSubcommand { serve, status, tools, call }
@@ -71,6 +282,7 @@ final class BridgeCliConfig {
     required this.requireTab,
     required this.waitTimeout,
     required this.callTimeout,
+    this.detach = false,
     this.hasExplicitWaitTimeout = false,
     this.connectHttp,
     this.portFile,
@@ -82,6 +294,7 @@ final class BridgeCliConfig {
   final BridgeSubcommand subcommand;
   final String host;
   final int port;
+  final bool detach;
   final bool stdio;
   final bool showHelp;
   final bool useStdinArgs;
@@ -106,6 +319,7 @@ final class BridgeCliConfig {
 final class _MutableCliOptions {
   String host = 'localhost';
   int port = defaultBridgePort;
+  bool detach = false;
   bool stdio = false;
   bool showHelp = false;
   bool useStdinArgs = false;
@@ -164,6 +378,8 @@ int _consumeFlag(List<String> args, int index, _MutableCliOptions opts) {
   switch (name) {
     case '-h' || '--help':
       opts.showHelp = true;
+    case '--detach':
+      opts.detach = true;
     case '--stdio':
       opts.stdio = true;
     case '--stdin':
@@ -276,23 +492,44 @@ BridgeCliConfig _finalizeConfig(
   _MutableCliOptions opts,
   String? toolName,
   String? rawJsonArgs,
-) => BridgeCliConfig(
-  subcommand: subcommand,
-  host: opts.host,
-  port: opts.port,
-  stdio: opts.stdio,
-  showHelp: opts.showHelp,
-  useStdinArgs: opts.useStdinArgs,
-  requireTab: opts.requireTab,
-  waitTimeout: opts.waitTimeout,
-  hasExplicitWaitTimeout: opts.hasExplicitWaitTimeout,
-  callTimeout: opts.callTimeout,
-  connectHttp: opts.connectHttp,
-  portFile: opts.portFile,
-  sessionId: opts.sessionId,
-  toolName: toolName,
-  rawJsonArgs: rawJsonArgs,
-);
+) {
+  if (!opts.showHelp) {
+    _validateFlagCombinations(subcommand, opts);
+  }
+  return BridgeCliConfig(
+    subcommand: subcommand,
+    host: opts.host,
+    port: opts.port,
+    detach: opts.detach,
+    stdio: opts.stdio,
+    showHelp: opts.showHelp,
+    useStdinArgs: opts.useStdinArgs,
+    requireTab: opts.requireTab,
+    waitTimeout: opts.waitTimeout,
+    hasExplicitWaitTimeout: opts.hasExplicitWaitTimeout,
+    callTimeout: opts.callTimeout,
+    connectHttp: opts.connectHttp,
+    portFile: opts.portFile,
+    sessionId: opts.sessionId,
+    toolName: toolName,
+    rawJsonArgs: rawJsonArgs,
+  );
+}
+
+void _validateFlagCombinations(
+  BridgeSubcommand subcommand,
+  _MutableCliOptions opts,
+) {
+  if (opts.detach && opts.stdio) {
+    throw const CliUsageException('Cannot combine --detach with --stdio.');
+  }
+  if (opts.detach && subcommand != BridgeSubcommand.serve) {
+    throw CliUsageException(
+      'Option --detach is only supported with `serve` '
+      '(got `${subcommand.name}`).',
+    );
+  }
+}
 
 /// Normalizes an HTTP URL string so empty or `/` paths target `/mcp`.
 Uri normalizeMcpEndpointUri(String rawUrl) {
@@ -340,11 +577,13 @@ final class DartPadMcpBridge {
   DartPadMcpBridge({
     this.waitTimeout = const Duration(seconds: 20),
     this.callTimeout = const Duration(seconds: 120),
+    this.pingInterval = const Duration(seconds: 15),
     this.logSink,
   });
 
   final Duration waitTimeout;
   final Duration callTimeout;
+  final Duration pingInterval;
   final StringSink? logSink;
 
   final List<HttpServer> _servers = <HttpServer>[];
@@ -352,7 +591,10 @@ final class DartPadMcpBridge {
       <StreamSubscription<HttpRequest>>[];
   final Map<int, _BrowserTab> _tabs = <int, _BrowserTab>{};
   final List<Completer<void>> _tabWaiters = <Completer<void>>[];
-  List<Map<String, Object?>> _cachedTools = const <Map<String, Object?>>[];
+  final StreamController<void> _toolsChangedController =
+      StreamController<void>.broadcast();
+  List<Map<String, Object?>> _cachedTools = defaultDartPadTools;
+  late String _cachedToolsSignature = jsonEncode(_cachedTools);
 
   int _boundPort = 0;
   int _nextConnId = 0;
@@ -361,6 +603,10 @@ final class DartPadMcpBridge {
 
   /// Bound TCP port once started, or `0` before [start] completes.
   int get port => _boundPort;
+
+  /// Broadcast stream emitting an event whenever live browser tool schemas
+  /// differ from the previously cached tool list.
+  Stream<void> get onToolsListChanged => _toolsChangedController.stream;
 
   void _log(String message) {
     logSink?.writeln('[dartpad_mcp] $message');
@@ -372,11 +618,13 @@ final class DartPadMcpBridge {
     int port = defaultBridgePort,
     Duration waitTimeout = const Duration(seconds: 20),
     Duration callTimeout = const Duration(seconds: 120),
+    Duration pingInterval = const Duration(seconds: 15),
     StringSink? logSink,
   }) async {
     final bridge = DartPadMcpBridge(
       waitTimeout: waitTimeout,
       callTimeout: callTimeout,
+      pingInterval: pingInterval,
       logSink: logSink,
     );
     try {
@@ -459,6 +707,7 @@ final class DartPadMcpBridge {
       await server.close(force: true);
     }
     _servers.clear();
+    await _toolsChangedController.close();
   }
 
   Future<void> _closeTab(_BrowserTab tab) async {
@@ -479,7 +728,9 @@ final class DartPadMcpBridge {
         : _cachedTools.length;
     return <String, Object?>{
       'ok': true,
+      'pid': pid,
       'port': _boundPort,
+      'executable': Platform.resolvedExecutable,
       'connectedTabs': <Map<String, Object?>>[
         for (var i = 0; i < tabs.length; i++)
           <String, Object?>{
@@ -648,6 +899,9 @@ final class DartPadMcpBridge {
   }
 
   void _registerWebSocket(WebSocket socket, String peer) {
+    if (pingInterval > Duration.zero) {
+      socket.pingInterval = pingInterval;
+    }
     final tab = _BrowserTab(connId: ++_nextConnId, socket: socket, peer: peer);
     _tabs[tab.connId] = tab;
     _log('Tab connected: conn=${tab.connId} peer=$peer');
@@ -726,10 +980,9 @@ final class DartPadMcpBridge {
       tab
         ..tools = tools
         ..nativeSessionIdTools = nativeSessionIdTools;
-      if (tools.isNotEmpty) {
-        _cachedTools = tools;
-      }
+      _updateCachedTools(tools);
     }
+    _evictSupersededClientTabs(tab, clientTabId);
     tab
       ..sessionId = sid
       ..clientTabId = clientTabId
@@ -765,6 +1018,41 @@ final class DartPadMcpBridge {
     }
     final fallback = clientTabId.isNotEmpty ? clientTabId : 'tab-${tab.connId}';
     return _extractSessionIdFromUrl(url, fallback);
+  }
+
+  void _evictSupersededClientTabs(_BrowserTab activeTab, String clientTabId) {
+    if (clientTabId.isEmpty) {
+      return;
+    }
+    final stale = _tabs.values
+        .where(
+          (other) =>
+              other.connId != activeTab.connId &&
+              !other.closed &&
+              other.clientTabId == clientTabId,
+        )
+        .toList(growable: false);
+    for (final oldTab in stale) {
+      _tabs.remove(oldTab.connId);
+      _log(
+        'Evicting superseded tab: conn=${oldTab.connId} '
+        'clientTabId=$clientTabId',
+      );
+      unawaited(_closeTab(oldTab));
+    }
+  }
+
+  void _updateCachedTools(List<Map<String, Object?>> tools) {
+    if (tools.isEmpty) {
+      return;
+    }
+    final nextSignature = jsonEncode(tools);
+    final changed = nextSignature != _cachedToolsSignature;
+    _cachedTools = tools;
+    _cachedToolsSignature = nextSignature;
+    if (changed && !_closed && !_toolsChangedController.isClosed) {
+      _toolsChangedController.add(null);
+    }
   }
 
   void _onSocketClosed(_BrowserTab tab) {
@@ -911,7 +1199,7 @@ final class DartPadMcpBridge {
     return _rpcResult(reqId, <String, Object?>{
       'protocolVersion': negotiated,
       'capabilities': const <String, Object?>{
-        'tools': <String, Object?>{'listChanged': false},
+        'tools': <String, Object?>{'listChanged': true},
       },
       'serverInfo': _serverInfo,
       'instructions': _serverInstructions,
@@ -963,9 +1251,7 @@ final class DartPadMcpBridge {
         tab
           ..tools = tools
           ..nativeSessionIdTools = nativeSessionIdTools;
-        if (tools.isNotEmpty) {
-          _cachedTools = tools;
-        }
+        _updateCachedTools(tools);
         return tools;
       }
     } catch (_) {
@@ -1678,23 +1964,11 @@ Future<int> _runServeCommand(
   StringSink err,
   Future<void>? stopSignal,
 ) async {
-  final proxyUri = await _resolveStdioProxyTarget(config);
-  if (proxyUri != null) {
-    err.writeln(
-      '[dartpad_mcp] Forwarding stdio MCP to active bridge at $proxyUri',
-    );
-    final timeout =
-        config.waitTimeout + config.callTimeout + const Duration(seconds: 5);
-    await runMcpStdioLoop(
-      input: input,
-      out: out,
-      handler: (payload) => postMcpHttp(
-        proxyUri,
-        payload ?? const <String, Object?>{},
-        timeout: timeout,
-      ),
-    );
-    return 0;
+  if (config.detach) {
+    return _runDetachCommand(config, out, err);
+  }
+  if (config.stdio) {
+    return _runStdioCommand(config, input, out, err);
   }
 
   final bridge = await DartPadMcpBridge.start(
@@ -1706,19 +1980,334 @@ Future<int> _runServeCommand(
   );
   try {
     await _announceBoundBridge(bridge, config, err);
-    if (config.stdio) {
-      await runMcpStdioLoop(
-        input: input,
-        out: out,
-        handler: bridge.handleMcpPayload,
-      );
-    } else {
-      await (stopSignal ?? _waitForProcessTermination());
-    }
+    await (stopSignal ?? _waitForProcessTermination());
     return 0;
   } finally {
     await bridge.close();
   }
+}
+
+/// Resolves the command executable and prefix arguments needed to invoke this
+/// bridge in a child process (handling both standalone AOT bundles and JIT
+/// `dart bin/dartpad_mcp.dart` script invocations).
+({String executable, List<String> prefixArgs}) resolveSelfInvocation({
+  String? resolvedExecutable,
+  Uri? scriptUri,
+  String? fallbackScriptPath,
+}) {
+  final exe = resolvedExecutable ?? Platform.resolvedExecutable;
+  if (!_isDartVmExecutable(exe)) {
+    return (executable: exe, prefixArgs: const <String>[]);
+  }
+  final script = scriptUri ?? Platform.script;
+  if (script.scheme == 'file') {
+    final scriptPath = script.toFilePath();
+    if (scriptPath.endsWith('.dart') && !scriptPath.endsWith('_test.dart')) {
+      return (executable: exe, prefixArgs: <String>[scriptPath]);
+    }
+  }
+  final candidate =
+      fallbackScriptPath ?? File('bin/dartpad_mcp.dart').absolute.path;
+  if (File(candidate).existsSync()) {
+    return (executable: exe, prefixArgs: <String>[candidate]);
+  }
+  return (executable: exe, prefixArgs: const <String>[]);
+}
+
+bool _isDartVmExecutable(String executablePath) {
+  final normalized = executablePath.replaceAll(r'\', '/');
+  final slash = normalized.lastIndexOf('/');
+  final base = (slash >= 0 ? normalized.substring(slash + 1) : normalized)
+      .toLowerCase();
+  final stem = base.endsWith('.exe')
+      ? base.substring(0, base.length - 4)
+      : base;
+  return stem == 'dart' || stem == 'dartvm' || stem == 'dartaotruntime';
+}
+
+Future<int> _runDetachCommand(
+  BridgeCliConfig config,
+  StringSink out,
+  StringSink err,
+) async {
+  final invocation = resolveSelfInvocation();
+  if (config.port != 0) {
+    final existing = await fetchBridgeHealth(config.resolvedHealthUri);
+    if (existing != null) {
+      await _writePortFileIfRequested(config.portFile, config.port);
+      _writeSafe(
+        out,
+        const JsonEncoder.withIndent('  ').convert(
+          _buildDetachSummary(
+            port: config.port,
+            pidValue: existing['pid'],
+            reused: true,
+            invocation: invocation,
+          ),
+        ),
+      );
+      return 0;
+    }
+  }
+
+  final tempDir = await Directory.systemTemp.createTemp('dartpad_mcp_detach_');
+  try {
+    final readyPortFile = '${tempDir.path}/port';
+    final child = await Process.start(
+      invocation.executable,
+      <String>[
+        ...invocation.prefixArgs,
+        ..._buildDetachedChildArgs(config, readyPortFile),
+      ],
+      workingDirectory: Directory.systemTemp.path,
+      mode: ProcessStartMode.detached,
+    );
+    final boundPort = await _waitForDetachedBridgeReady(
+      readyPortFile: readyPortFile,
+      bindHost: config.host,
+    );
+    if (boundPort == null) {
+      err.writeln(
+        'Failed starting detached DartPad MCP bridge on '
+        '${config.host}:${config.port}.',
+      );
+      return 1;
+    }
+    await _writePortFileIfRequested(config.portFile, boundPort);
+    _writeSafe(
+      out,
+      const JsonEncoder.withIndent('  ').convert(
+        _buildDetachSummary(
+          port: boundPort,
+          pidValue: child.pid,
+          reused: false,
+          invocation: invocation,
+        ),
+      ),
+    );
+    return 0;
+  } finally {
+    try {
+      await tempDir.delete(recursive: true);
+    } catch (_) {
+      // Ignore temp directory cleanup errors.
+    }
+  }
+}
+
+List<String> _buildDetachedChildArgs(
+  BridgeCliConfig config,
+  String readyPortFile,
+) => <String>[
+  'serve',
+  '--host',
+  config.host,
+  '--port',
+  '${config.port}',
+  '--wait-timeout',
+  '${config.waitTimeout.inMilliseconds / 1000}',
+  '--call-timeout',
+  '${config.callTimeout.inMilliseconds / 1000}',
+  '--port-file',
+  readyPortFile,
+];
+
+Map<String, Object?> _buildDetachSummary({
+  required int port,
+  required Object? pidValue,
+  required bool reused,
+  required ({String executable, List<String> prefixArgs}) invocation,
+}) => <String, Object?>{
+  'ok': true,
+  'reused': reused,
+  'pid': pidValue,
+  'port': port,
+  'executable': invocation.executable,
+  if (invocation.prefixArgs.isNotEmpty) 'executableArgs': invocation.prefixArgs,
+  'mcpUrl': 'http://127.0.0.1:$port/mcp',
+  'wsUrl': 'ws://127.0.0.1:$port/mcp-ws',
+};
+
+Future<int?> _waitForDetachedBridgeReady({
+  required String readyPortFile,
+  required String bindHost,
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final probeHost = bindHost == '::1' ? '[::1]' : '127.0.0.1';
+  final portFile = File(readyPortFile);
+  final deadline = DateTime.now().add(timeout);
+  while (DateTime.now().isBefore(deadline)) {
+    final port = _tryReadPortFile(portFile);
+    if (port != null) {
+      final health = await fetchBridgeHealth(
+        Uri.parse('http://$probeHost:$port/healthz'),
+      );
+      if (health != null) {
+        return port;
+      }
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+  }
+  return null;
+}
+
+int? _tryReadPortFile(File portFile) {
+  if (!portFile.existsSync()) {
+    return null;
+  }
+  return int.tryParse(portFile.readAsStringSync().trim());
+}
+
+Future<void> _writePortFileIfRequested(String? portFile, int port) async {
+  if (portFile != null) {
+    await File(portFile).writeAsString('$port\n');
+  }
+}
+
+Future<int> _runStdioCommand(
+  BridgeCliConfig config,
+  Stream<List<int>> input,
+  StringSink out,
+  StringSink err,
+) async {
+  final runner = _StdioBridgeRunner(config: config, out: out, err: err);
+  try {
+    await runner.init();
+    await runMcpStdioLoop(
+      input: input,
+      out: out,
+      handler: runner.handlePayload,
+    );
+    return 0;
+  } finally {
+    await runner.close();
+  }
+}
+
+final class _StdioBridgeRunner {
+  _StdioBridgeRunner({
+    required this.config,
+    required this.out,
+    required this.err,
+  });
+
+  final BridgeCliConfig config;
+  final StringSink out;
+  final StringSink err;
+
+  DartPadMcpBridge? _ownedBridge;
+  StreamSubscription<void>? _toolsChangedSub;
+  Uri? _proxyUri;
+  bool _initialized = false;
+
+  Duration get _proxyTimeout =>
+      config.waitTimeout + config.callTimeout + const Duration(seconds: 5);
+
+  Future<void> init() async {
+    final target = await _resolveStdioProxyTarget(config);
+    if (target != null) {
+      _proxyUri = target;
+      err.writeln(
+        '[dartpad_mcp] Forwarding stdio MCP to active bridge at $target',
+      );
+      return;
+    }
+    await _startOwnedBridge();
+  }
+
+  Future<Object?> handlePayload(Object? payload) async {
+    final isInit = _payloadHasInitialize(payload);
+    final response = _ownedBridge != null
+        ? await _ownedBridge!.handleMcpPayload(payload)
+        : await _forwardOrFailover(payload);
+    if (isInit) {
+      _initialized = true;
+    }
+    return response;
+  }
+
+  Future<Object?> _forwardOrFailover(Object? payload) async {
+    final target = _proxyUri!;
+    try {
+      return await postMcpHttp(
+        target,
+        payload ?? const <String, Object?>{},
+        timeout: _proxyTimeout,
+      );
+    } on SocketException {
+      if (config.connectHttp != null || config.port == 0) {
+        rethrow;
+      }
+      await _recoverFromDeadProxy(target);
+      if (_ownedBridge != null) {
+        return _ownedBridge!.handleMcpPayload(payload);
+      }
+      return postMcpHttp(
+        _proxyUri!,
+        payload ?? const <String, Object?>{},
+        timeout: _proxyTimeout,
+      );
+    }
+  }
+
+  Future<void> _recoverFromDeadProxy(Uri previousTarget) async {
+    err.writeln(
+      '[dartpad_mcp] Active bridge at $previousTarget exited; '
+      're-binding port ${config.port}',
+    );
+    try {
+      await _startOwnedBridge();
+    } on SocketException {
+      if (await fetchBridgeHealth(config.resolvedHealthUri) == null) {
+        rethrow;
+      }
+      _proxyUri = config.resolvedMcpUri;
+    }
+  }
+
+  Future<void> _startOwnedBridge() async {
+    final bridge = await DartPadMcpBridge.start(
+      host: config.host,
+      port: config.port,
+      waitTimeout: config.waitTimeout,
+      callTimeout: config.callTimeout,
+      logSink: err,
+    );
+    _ownedBridge = bridge;
+    _proxyUri = null;
+    await _announceBoundBridge(bridge, config, err);
+    await _toolsChangedSub?.cancel();
+    _toolsChangedSub = bridge.onToolsListChanged.listen((_) {
+      if (_initialized) {
+        _writeSafe(
+          out,
+          jsonEncode(const <String, Object?>{
+            'jsonrpc': '2.0',
+            'method': 'notifications/tools/list_changed',
+          }),
+        );
+      }
+    });
+  }
+
+  Future<void> close() async {
+    await _toolsChangedSub?.cancel();
+    _toolsChangedSub = null;
+    await _ownedBridge?.close();
+    _ownedBridge = null;
+  }
+}
+
+bool _payloadHasInitialize(Object? payload) {
+  if (payload is Map<String, Object?>) {
+    return payload['method'] == 'initialize';
+  }
+  if (payload is List<Object?>) {
+    return payload.any(
+      (item) => item is Map<String, Object?> && item['method'] == 'initialize',
+    );
+  }
+  return false;
 }
 
 Future<Uri?> _resolveStdioProxyTarget(BridgeCliConfig config) async {

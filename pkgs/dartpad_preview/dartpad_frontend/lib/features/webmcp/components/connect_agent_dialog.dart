@@ -109,9 +109,9 @@ AgentBrowserNotice? detectLocalBridgeBrowserWarning({
   }
   final String lead = localNetworkPermissionState == 'granted'
       ? 'Local Network Access is allowed for 127.0.0.1:$port. If your agent runs on a remote '
-            'SSH/Cloudtop host, forward port $port ('
+            'SSH host, forward port $port ('
       : 'Click Allow if Chrome prompts for Local Network Access so this tab can reach '
-            '127.0.0.1:$port. If your agent runs on a remote SSH/Cloudtop host, forward '
+            '127.0.0.1:$port. If your agent runs on a remote SSH host, forward '
             'port $port (';
   return AgentBrowserNotice(
     isBlockingError: false,
@@ -150,18 +150,19 @@ String buildAgentBootstrapPrompt({
       : 'https://dartpad-webmcp.web.app/?$defaultQuery';
   return '''
 Connect to my DartPad Preview browser tab at $targetTabUrl$sessionClause, which dials `ws://127.0.0.1:$port/mcp-ws` on the browser's machine:
-(If you are running on a remote SSH/Cloudtop host instead of the machine running my browser, ask me to forward port $port via `ssh -L $port:127.0.0.1:$port` or run the bridge locally.)
+(If you are running on a remote SSH host instead of the machine running my browser, ask me to forward port $port via `ssh -L $port:127.0.0.1:$port` or run the bridge locally.)
 
-1. Start the zero-dependency local MCP bridge in the background on port $port (skip if `http://127.0.0.1:$port/healthz` already responds):
-   - Preferred (Dart 3.12+): `dart run '$dartPadMcpGitSpec' --port $port`
-   - Fallback (if standalone `dart` is unavailable): `curl -fsSL $dartPadMcpPythonUrl -o /tmp/dartpad_mcp_server.py && python3 /tmp/dartpad_mcp_server.py --port $port`
+1. Start the zero-dependency local MCP bridge detached on port $port:
+   - Preferred (Dart 3.12+): `dart run '$dartPadMcpGitSpec' --detach --port $port`
+     Save the `"executable"` path printed in the JSON output (`<dartpad_mcp_exe>`) so subsequent CLI calls run directly in ~15ms without re-resolving Git.
+   - Fallback (if standalone `dart` is unavailable): `curl -fsSL $dartPadMcpPythonUrl -o /tmp/dartpad_mcp_server.py && python3 /tmp/dartpad_mcp_server.py --port $port` (run in background)
 2. Wait ~1-2s for the open tab's auto-reconnect loop, then verify the target tab is connected:
-   `dart run '$dartPadMcpGitSpec' status --port $port --require-tab$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py status --port $port --require-tab$sessionFlag`)
+   `<dartpad_mcp_exe> status --port $port --require-tab$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py status --port $port --require-tab$sessionFlag`)
    - If `status --require-tab` exits with code 2: open `$targetTabUrl` in Chrome if no tab is open yet, or if the tab is open on `https://`, ask me to click **Allow** on Chrome's Local Network Access prompt in the address bar (Safari blocks `https://` -> `ws://127.0.0.1`), then re-run `status --require-tab$sessionFlag`.
-3. Register `http://127.0.0.1:$port/mcp` (Streamable HTTP) or `--stdio` as an MCP server if supported, AND call DartPad tools immediately right now without restarting:
-   - List tools and exact JSON schemas first: `dart run '$dartPadMcpGitSpec' tools --port $port$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py tools --port $port$sessionFlag`)
+3. Register `http://127.0.0.1:$port/mcp` (Streamable HTTP) or `<dartpad_mcp_exe> --stdio --port $port` as an MCP server if supported, AND call DartPad tools immediately right now without restarting:
+   - List tools and exact JSON schemas first: `<dartpad_mcp_exe> tools --port $port$sessionFlag` (or `python3 /tmp/dartpad_mcp_server.py tools --port $port$sessionFlag`)
    - Call a tool with JSON args matching `inputSchema` (e.g. `dartpad_write_files` takes `{"files":[{"path":"lib/main.dart","content":"..."}]}`):
-     `dart run '$dartPadMcpGitSpec' call <tool_name> --stdin --port $port$sessionFlag << 'EOF'`
+     `<dartpad_mcp_exe> call <tool_name> --stdin --port $port$sessionFlag << 'EOF'`
 4. Task: ${starterTask.instruction}''';
 }
 

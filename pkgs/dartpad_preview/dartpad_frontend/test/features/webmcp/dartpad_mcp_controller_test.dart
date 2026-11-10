@@ -75,7 +75,7 @@ void main() {
     api = MemoryWorkspaceResourceApi();
     pubCalls = <({String path, String command, List<String> args})>[];
     final initialFiles = <String, String>{
-      'pubspec.yaml': 'name: sample_app\ndependencies:\n',
+      'pubspec.yaml': 'name: sample_app\ndependencies:\n  flutter:\n    sdk: flutter\n  material_ui:\n',
       'lib/main.dart': "void main() {\n  print('hello');\n}\n",
     };
     await ProjectLoader.writeFiles(api.root, testProjectContents(initialFiles));
@@ -148,6 +148,7 @@ void main() {
     final byNameMap = jsonDecode(_jsJsonStringify(byNameRaw)!.toDart) as Map<String, Object?>;
     expect(byNameMap['sessionId'], '3');
     expect(byNameMap['entrypoint'], 'lib/main.dart');
+    expect(byNameMap['dependencies'], <String>['flutter', 'material_ui']);
     expect(byNameMap['previewState'], 'initial');
 
     // Execute by RegisteredTool object from getTools().
@@ -214,6 +215,10 @@ void main() {
     expect(pubCalls.single.args, <String>['collection']);
     expect(pubspecTab.content, contains('collection: ^1.19.0'));
     expect(pubspecTab.hasUnsavedChanges, isFalse);
+
+    final statusAfterPub = await controller.callTool('dartpad_get_status');
+    expect(statusAfterPub['dependencies'], <String>['collection', 'flutter', 'material_ui']);
+    expect(extractPubspecDependencyNames('not: [valid: yaml'), isEmpty);
   });
 
   test('createUnthrottledTimer fires and supports cancellation', () async {
@@ -284,6 +289,8 @@ void main() {
     expect(chromeHttps!.isBlockingError, isFalse);
     expect(chromeHttps.inlineCode, 'ssh -L 8788:127.0.0.1:8788');
     expect(chromeHttps.message, contains('Local Network Access'));
+    expect(chromeHttps.message, contains('remote SSH host'));
+    expect(chromeHttps.message, isNot(contains('Cloudtop')));
     expect(chromeHttps.message, contains('ssh -L 8788:127.0.0.1:8788'));
 
     expect(
@@ -324,13 +331,16 @@ void main() {
     );
     expect(prompt, contains('https://dartpad-webmcp.web.app/?s=7&mcp_port=8788 (session s=7)'));
     expect(prompt, contains('ws://127.0.0.1:8788/mcp-ws'));
+    expect(prompt, contains('remote SSH host'));
+    expect(prompt, isNot(contains('Cloudtop')));
+    expect(prompt, isNot(contains('dart install')));
     expect(prompt, contains('ssh -L 8788:127.0.0.1:8788'));
     expect(prompt, contains('Local Network Access'));
-    expect(prompt, contains("dart run '$dartPadMcpGitSpec' --port 8788"));
-    expect(prompt, contains("dart run '$dartPadMcpGitSpec' status --port 8788 --require-tab --session 7"));
+    expect(prompt, contains("dart run '$dartPadMcpGitSpec' --detach --port 8788"));
+    expect(prompt, contains('<dartpad_mcp_exe> status --port 8788 --require-tab --session 7'));
     expect(prompt, contains('python3 /tmp/dartpad_mcp_server.py status --port 8788 --require-tab --session 7'));
-    expect(prompt, contains("dart run '$dartPadMcpGitSpec' tools --port 8788 --session 7"));
-    expect(prompt, contains("dart run '$dartPadMcpGitSpec' call <tool_name> --stdin --port 8788 --session 7"));
+    expect(prompt, contains('<dartpad_mcp_exe> tools --port 8788 --session 7'));
+    expect(prompt, contains('<dartpad_mcp_exe> call <tool_name> --stdin --port 8788 --session 7'));
     expect(prompt, isNot(contains(r'$CLI')));
     expect(prompt, contains('--session 7'));
     expect(prompt, contains(AgentStarterTask.materialMakeover.instruction));
